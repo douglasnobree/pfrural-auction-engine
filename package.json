@@ -1,0 +1,50 @@
+{
+  "name": "pfrural-auction-engine",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Transactional auction engine for Princesa Rural",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev:api": "tsx watch src/api/server.ts",
+    "dev:worker": "tsx watch src/worker/main.ts",
+    "start:api": "node dist/api/server.js",
+    "start:worker": "node dist/worker/main.js",
+    "prebuild": "prisma generate",
+    "build": "tsc -p tsconfig.json",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate deploy",
+    "db:validate": "prisma validate",
+    "db:seed:demo": "tsx src/scripts/seed-demo.ts"
+  },
+  "dependencies": {
+    "@fastify/cors": "^10.0.2",
+    "amqplib": "^0.10.5",
+    "dotenv": "^16.4.7",
+    "fastify": "^5.2.1",
+    "ioredis": "^5.4.2",
+    "@prisma/client": "^6.18.0",
+    "pg": "^8.13.1",
+    "ws": "^8.18.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/amqplib": "^0.10.6",
+    "@types/node": "^22.10.7",
+    "@types/pg": "^8.11.11",
+    "@types/ws": "^8.5.13",
+    "prisma": "^6.18.0",
+    "typescript-eslint": "^8.20.0",
+    "@typescript-eslint/eslint-plugin": "^8.20.0",
+    "@typescript-eslint/parser": "^8.20.0",
+    "eslint": "^9.18.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  }
+}

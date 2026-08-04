@@ -1,0 +1,377 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum AuctionMode {
+  SHOPPING
+  LIVE
+  TIMED
+}
+enum AuctionStatus {
+  DRAFT
+  REVIEW
+  SCHEDULED
+  RUNNING
+  PAUSED
+  FINISHED
+  CANCELLED
+  ABORTED
+}
+enum LotStatus {
+  DRAFT
+  QUEUED
+  OPEN
+  PAUSED
+  CLOSING
+  SOLD
+  UNSOLD
+  CANCELLED
+}
+enum ApprovalMode {
+  AUTOMATIC
+  MANUAL_FIFO
+}
+enum RegistrationStatus {
+  PENDING
+  APPROVED
+  SUSPENDED
+  REVOKED
+}
+enum BidRequestStatus {
+  RECEIVED
+  PENDING_APPROVAL
+  ACCEPTED
+  REJECTED
+  EXPIRED
+  SUPERSEDED
+}
+enum BidOrigin {
+  ONLINE
+  PROXY
+  FLOOR
+  PHONE
+}
+enum SettlementStatus {
+  PENDING
+  PAYMENT_PENDING
+  PAID
+  FAILED
+  CANCELLED
+}
+enum StreamStatus {
+  CREATED
+  STARTING
+  LIVE
+  ENDED
+  FAILED
+}
+enum ReservationStatus {
+  RESERVED
+  EXPIRED
+  COMPLETED
+  CANCELLED
+}
+
+model AuctionExecution {
+  id                 String        @id @default(uuid()) @db.Uuid
+  externalAuctionId  String        @unique @map("external_auction_id")
+  title              String
+  mode               AuctionMode
+  status             AuctionStatus @default(DRAFT)
+  currency           String        @default("BRL") @db.Char(3)
+  regulationVersion  String        @map("regulation_version")
+  approvalMode       ApprovalMode  @default(AUTOMATIC) @map("approval_mode")
+  startsAt           DateTime?     @map("starts_at")
+  endsAt             DateTime?     @map("ends_at")
+  version            BigInt        @default(0)
+  currentLotId       String?       @unique @map("current_lot_id") @db.Uuid
+  currentLot         AuctionLotExecution? @relation("CurrentLot", fields: [currentLotId], references: [id])
+  lots               AuctionLotExecution[] @relation("AuctionLots")
+  registrations      AuctionRegistration[]
+  streams            StreamSession[]
+  tickets             RealtimeTicket[]
+  outboxEvents        OutboxEvent[]
+  eventLogs           AuctionEventLog[]
+  createdAt           DateTime      @default(now()) @map("created_at")
+  updatedAt           DateTime      @updatedAt @map("updated_at")
+
+  @@map("auction_execution")
+}
+
+model AuctionLotExecution {
+  id                    String        @id @default(uuid()) @db.Uuid
+  auctionId             String        @map("auction_id") @db.Uuid
+  auction               AuctionExecution @relation("AuctionLots", fields: [auctionId], references: [id])
+  currentForAuction     AuctionExecution? @relation("CurrentLot")
+  externalLotId         String        @map("external_lot_id")
+  lotNumber             Int           @map("lot_number")
+  title                 String
+  status                LotStatus     @default(DRAFT)
+  startingBidCents      BigInt        @default(0) @map("starting_bid_cents")
+  incrementCents        BigInt        @default(1) @map("increment_cents")
+  reservePriceCents     BigInt?       @map("reserve_price_cents")
+  fixedPriceCents       BigInt?       @map("fixed_price_cents")
+  quantity              Int           @default(1)
+  availableQuantity     Int           @default(1) @map("available_quantity")
+  startsAt              DateTime?     @map("starts_at")
+  endsAt                DateTime?     @map("ends_at")
+  extensionWindowSeconds Int          @default(0) @map("extension_window_seconds")
+  extensionSeconds      Int           @default(0) @map("extension_seconds")
+  maxExtensions         Int?          @map("max_extensions")
+  extensionCount        Int           @default(0) @map("extension_count")
+  currentPriceCents     BigInt?       @map("current_price_cents")
+  currentBidderId       String?       @map("current_bidder_id")
+  currentBidderAlias    String?       @map("current_bidder_alias")
+  lotSequence           BigInt        @default(0) @map("lot_sequence")
+  version               BigInt        @default(0)
+  bidRequests           BidRequest[]
+  bidIntents            BidIntent[]
+  proxyBids             ProxyBid[]
+  effectiveBids         EffectiveBid[]
+  winnerAward           WinnerAward?
+  reservations          ShoppingReservation[]
+  outboxEvents          OutboxEvent[]
+  eventLogs             AuctionEventLog[]
+  createdAt             DateTime      @default(now()) @map("created_at")
+  updatedAt             DateTime      @updatedAt @map("updated_at")
+
+  @@unique([auctionId, lotNumber])
+  @@unique([auctionId, externalLotId])
+  @@map("auction_lot_execution")
+}
+
+model AuctionRegistration {
+  id          String             @id @default(uuid()) @db.Uuid
+  auctionId   String             @map("auction_id") @db.Uuid
+  auction     AuctionExecution   @relation(fields: [auctionId], references: [id])
+  userId      String             @map("user_id")
+  status      RegistrationStatus  @default(PENDING)
+  termsVersion String            @map("terms_version")
+  acceptedAt  DateTime            @default(now()) @map("accepted_at")
+  createdAt   DateTime            @default(now()) @map("created_at")
+  @@unique([auctionId, userId])
+  @@map("auction_registration")
+}
+
+model BidRequest {
+  id                   String           @id @default(uuid()) @db.Uuid
+  lotId                String           @map("lot_id") @db.Uuid
+  lot                  AuctionLotExecution @relation(fields: [lotId], references: [id])
+  userId               String           @map("user_id")
+  displayName          String?          @map("display_name")
+  idempotencyKey       String           @map("idempotency_key")
+  commandId            String           @map("command_id")
+  status               BidRequestStatus @default(RECEIVED)
+  requestedAmountCents BigInt           @map("requested_amount_cents")
+  origin               BidOrigin        @default(ONLINE)
+  actorId              String?          @map("actor_id")
+  expectedVersion      BigInt?          @map("expected_version")
+  result               Json?
+  errorCode            String?          @map("error_code")
+  receivedAt           DateTime         @default(now()) @map("received_at")
+  completedAt          DateTime?        @map("completed_at")
+  intent               BidIntent?
+  @@unique([lotId, userId, idempotencyKey])
+  @@map("bid_request")
+}
+
+model BidIntent {
+  id                   String           @id @default(uuid()) @db.Uuid
+  bidRequestId         String           @unique @map("bid_request_id") @db.Uuid
+  bidRequest           BidRequest       @relation(fields: [bidRequestId], references: [id])
+  lotId                String           @map("lot_id") @db.Uuid
+  lot                  AuctionLotExecution @relation(fields: [lotId], references: [id])
+  userId               String           @map("user_id")
+  displayName          String?          @map("display_name")
+  origin               BidOrigin
+  requestedAmountCents BigInt           @map("requested_amount_cents")
+  actorId              String?          @map("actor_id")
+  intentSequence       BigInt           @map("intent_sequence")
+  receivedAt           DateTime         @default(now()) @map("received_at")
+  approvedAt           DateTime?        @map("approved_at")
+  proxyBids            ProxyBid[]
+  effectiveBids        EffectiveBid[]
+  causedEffectiveBids  EffectiveBid[]  @relation("CausedByIntent")
+  @@unique([lotId, intentSequence])
+  @@map("bid_intent")
+}
+
+model ProxyBid {
+  id                String     @id @default(uuid()) @db.Uuid
+  lotId             String     @map("lot_id") @db.Uuid
+  lot               AuctionLotExecution @relation(fields: [lotId], references: [id])
+  userId            String     @map("user_id")
+  displayName       String?    @map("display_name")
+  maxBidCents       BigInt     @map("max_bid_cents")
+  origin            BidOrigin
+  acceptedIntentId  String     @map("accepted_intent_id") @db.Uuid
+  acceptedIntent    BidIntent  @relation(fields: [acceptedIntentId], references: [id])
+  acceptedSequence  BigInt     @map("accepted_sequence")
+  active            Boolean    @default(true)
+  createdAt         DateTime   @default(now()) @map("created_at")
+  updatedAt         DateTime   @updatedAt @map("updated_at")
+  @@index([lotId, active])
+  @@map("proxy_bid")
+}
+
+model EffectiveBid {
+  id                 String     @id @default(uuid()) @db.Uuid
+  lotId              String     @map("lot_id") @db.Uuid
+  lot                AuctionLotExecution @relation(fields: [lotId], references: [id])
+  bidIntentId        String     @map("bid_intent_id") @db.Uuid
+  bidIntent          BidIntent  @relation(fields: [bidIntentId], references: [id])
+  userId             String     @map("user_id")
+  origin             BidOrigin
+  amountCents        BigInt     @map("amount_cents")
+  lotSequence        BigInt     @map("lot_sequence")
+  causedByIntentId   String?    @map("caused_by_intent_id") @db.Uuid
+  causedByIntent     BidIntent? @relation("CausedByIntent", fields: [causedByIntentId], references: [id])
+  winnerAwards       WinnerAward[]
+  createdAt          DateTime   @default(now()) @map("created_at")
+  @@unique([lotId, lotSequence])
+  @@map("effective_bid")
+}
+
+model WinnerAward {
+  id                  String       @id @default(uuid()) @db.Uuid
+  lotId               String       @unique @map("lot_id") @db.Uuid
+  lot                 AuctionLotExecution @relation(fields: [lotId], references: [id])
+  winnerUserId        String       @map("winner_user_id")
+  winningAmountCents  BigInt       @map("winning_amount_cents")
+  sourceEffectiveBidId String?     @map("source_effective_bid_id") @db.Uuid
+  sourceEffectiveBid  EffectiveBid? @relation(fields: [sourceEffectiveBidId], references: [id])
+  settlement          Settlement?
+  createdAt           DateTime     @default(now()) @map("created_at")
+  @@map("winner_award")
+}
+
+model Settlement {
+  id             String          @id @default(uuid()) @db.Uuid
+  winnerAwardId  String          @unique @map("winner_award_id") @db.Uuid
+  winnerAward    WinnerAward     @relation(fields: [winnerAwardId], references: [id])
+  status         SettlementStatus @default(PENDING)
+  externalOrderId String?        @map("external_order_id")
+  amountCents    BigInt          @map("amount_cents")
+  currency       String          @default("BRL") @db.Char(3)
+  reservations   ShoppingReservation[]
+  createdAt      DateTime        @default(now()) @map("created_at")
+  updatedAt      DateTime        @updatedAt @map("updated_at")
+  @@map("settlement")
+}
+
+model ManagerAction {
+  id              String   @id @default(uuid()) @db.Uuid
+  actorId         String   @map("actor_id")
+  action          String
+  targetType      String   @map("target_type")
+  targetId        String   @map("target_id") @db.Uuid
+  idempotencyKey  String   @map("idempotency_key")
+  expectedVersion BigInt?  @map("expected_version")
+  payload         Json     @default("{}")
+  result          Json?
+  createdAt       DateTime @default(now()) @map("created_at")
+  @@unique([actorId, idempotencyKey])
+  @@map("manager_action")
+}
+
+model StreamSession {
+  id               String       @id @default(uuid()) @db.Uuid
+  auctionId        String       @map("auction_id") @db.Uuid
+  auction          AuctionExecution @relation(fields: [auctionId], references: [id])
+  provider         String
+  playbackUrl      String?      @map("playback_url")
+  providerStreamId String?      @map("provider_stream_id")
+  status           StreamStatus @default(CREATED)
+  version          BigInt       @default(0)
+  metadata         Json         @default("{}")
+  createdAt        DateTime     @default(now()) @map("created_at")
+  updatedAt        DateTime     @updatedAt @map("updated_at")
+  @@map("stream_session")
+}
+
+model ShoppingReservation {
+  id             String            @id @default(uuid()) @db.Uuid
+  lotId          String            @map("lot_id") @db.Uuid
+  lot            AuctionLotExecution @relation(fields: [lotId], references: [id])
+  userId         String            @map("user_id")
+  idempotencyKey String            @map("idempotency_key")
+  quantity       Int
+  status         ReservationStatus @default(RESERVED)
+  expiresAt      DateTime          @map("expires_at")
+  settlementId   String?           @map("settlement_id") @db.Uuid
+  settlement     Settlement?       @relation(fields: [settlementId], references: [id])
+  createdAt      DateTime          @default(now()) @map("created_at")
+  @@unique([lotId, userId, idempotencyKey])
+  @@map("shopping_reservation")
+}
+
+model OutboxEvent {
+  id               String       @id @default(uuid()) @db.Uuid
+  eventId          String       @unique @default(uuid()) @map("event_id") @db.Uuid
+  eventType        String       @map("event_type")
+  schemaVersion    Int          @default(1) @map("schema_version")
+  routingKey       String       @map("routing_key")
+  aggregateType    String       @map("aggregate_type")
+  aggregateId      String       @map("aggregate_id") @db.Uuid
+  auctionId        String?      @map("auction_id") @db.Uuid
+  auction          AuctionExecution? @relation(fields: [auctionId], references: [id])
+  lotId            String?      @map("lot_id") @db.Uuid
+  lot              AuctionLotExecution? @relation(fields: [lotId], references: [id])
+  aggregateVersion BigInt?      @map("aggregate_version")
+  lotSequence      BigInt?      @map("lot_sequence")
+  correlationId    String       @map("correlation_id")
+  causationId      String?      @map("causation_id")
+  traceId          String?      @map("trace_id")
+  actorId          String?      @map("actor_id")
+  payload          Json
+  occurredAt       DateTime     @default(now()) @map("occurred_at")
+  publishedAt      DateTime?    @map("published_at")
+  attempts         Int          @default(0)
+  nextAttemptAt    DateTime     @default(now()) @map("next_attempt_at")
+  lastError        String?      @map("last_error")
+  @@index([nextAttemptAt, occurredAt])
+  @@map("outbox_event")
+}
+
+model ConsumerInbox {
+  messageId   String   @map("message_id")
+  consumerName String  @map("consumer_name")
+  processedAt DateTime @default(now()) @map("processed_at")
+  @@id([messageId, consumerName])
+  @@map("consumer_inbox")
+}
+
+model AuctionEventLog {
+  id             String       @id @default(uuid()) @db.Uuid
+  eventId        String       @unique @map("event_id") @db.Uuid
+  auctionId      String?      @map("auction_id") @db.Uuid
+  auction        AuctionExecution? @relation(fields: [auctionId], references: [id])
+  lotId          String?      @map("lot_id") @db.Uuid
+  lot            AuctionLotExecution? @relation(fields: [lotId], references: [id])
+  lotSequence    BigInt?      @map("lot_sequence")
+  eventType      String       @map("event_type")
+  schemaVersion  Int          @default(1) @map("schema_version")
+  payload        Json
+  occurredAt     DateTime     @default(now()) @map("occurred_at")
+  @@unique([lotId, lotSequence])
+  @@index([lotId, lotSequence])
+  @@map("auction_event_log")
+}
+
+model RealtimeTicket {
+  id         String   @id @default(uuid()) @db.Uuid
+  tokenHash  String   @unique @map("token_hash")
+  auctionId  String   @map("auction_id") @db.Uuid
+  auction    AuctionExecution @relation(fields: [auctionId], references: [id])
+  userId     String   @map("user_id")
+  roles      Json     @default("[]")
+  expiresAt  DateTime @map("expires_at")
+  usedAt     DateTime? @map("used_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+  @@map("realtime_ticket")
+}
