@@ -1,0 +1,140 @@
+name: Deploy auction engine
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: auction-engine-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to VPS
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.2
+        env:
+          DEPLOY_SHA: ${{ github.sha }}
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          command_timeout: 30m
+          envs: DEPLOY_SHA
+          script: |
+            set -eu
+
+            DEPLOY_PATH="/apps/auction-engine"
+            COMPOSE_FILE="${DEPLOY_PATH}/docker-compose.prod.yml"
+            COMPOSE="docker compose --env-file ${DEPLOY_PATH}/.env -f ${COMPOSE_FILE}"
+
+            deployment_diagnostics() {
+              exit_code="$?"
+              trap - EXIT
+              if [ "${exit_code}" -ne 0 ]; then
+                echo "Deployment failed. Current service state:" >&2
+                ${COMPOSE} ps >&2 || true
+                ${COMPOSE} logs --tail=150 auction-api auction-worker auction-rabbitmq >&2 || true
+              fi
+              exit "${exit_code}"
+            }
+            trap deployment_diagnostics EXIT
+
+            test -d "${DEPLOY_PATH}"
+            test -f "${COMPOSE_FILE}"
+            test -f "${DEPLOY_PATH}/.env"
+            test -n "${DEPLOY_SHA}"
+
+            cd "${DEPLOY_PATH}"
+            test "$(git branch --show-current)" = "main"
+            git diff --quiet
+            git diff --cached --quiet
+            git fetch --prune origin main
+            git merge --ff-only "${DEPLOY_SHA}"
+            test "$(git rev-parse HEAD)" = "${DEPLOY_SHA}"
+
+            ${COMPOSE} config >/dev/null
+            services="$(${COMPOSE} config --services)"
+            for required_service in auction-postgres auction-rabbitmq auction-redis auction-api auction-worker; do
+              echo "${services}" | grep -qx "${required_service}" || {
+                echo "Missing Compose service: ${required_service}" >&2
+                exit 1
+              }
+            done
+
+            ${COMPOSE} build --pull auction-api auction-worker
+            ${COMPOSE} up -d auction-postgres auction-rabbitmq auction-redis
+
+            wait_for_health() {
+              service="$1"
+              for attempt in $(seq 1 60); do
+                container_id="$(${COMPOSE} ps -q "${service}")"
+                status=""
+                if [ -n "${container_id}" ]; then
+                  status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' "${container_id}" 2>/dev/null || true)"
+                fi
+                if [ "${status}" = "healthy" ]; then
+                  return 0
+                fi
+                sleep 2
+              done
+              echo "Service ${service} did not become healthy" >&2
+              ${COMPOSE} logs --tail=100 "${service}" >&2 || true
+              return 1
+            }
+
+            wait_for_health auction-postgres
+            wait_for_health auction-rabbitmq
+            wait_for_health auction-redis
+
+            # Apply migrations in an isolated one-off container before starting
+            # the new API/worker image. This avoids booting code against an old schema.
+            ${COMPOSE} run --rm --no-deps auction-api npm run db:migrate
+            ${COMPOSE} up -d --force-recreate auction-api auction-worker
+
+            for attempt in $(seq 1 30); do
+              if ${COMPOSE} exec -T auction-api node -e '
+                fetch("http://127.0.0.1:4100/ready")
+                  .then(async response => {
+                    if (!response.ok) process.exit(1);
+                    console.log(await response.text());
+                  })
+                  .catch(() => process.exit(1));
+              '; then
+                break
+              fi
+              if [ "${attempt}" = "30" ]; then
+                echo "Auction API did not become ready" >&2
+                exit 1
+              fi
+              sleep 2
+            done
+
+            ${COMPOSE} exec -T auction-api node -e '
+              const amqp = require("amqplib");
+              amqp.connect(process.env.RABBITMQ_URL)
+                .then(connection => connection.close())
+                .then(() => console.log("RabbitMQ connection ok"))
+                .catch(error => {
+                  console.error(error);
+                  process.exit(1);
+                });
+            '
+
+            api_id="$(${COMPOSE} ps -q auction-api)"
+            worker_id="$(${COMPOSE} ps -q auction-worker)"
+            test -n "${api_id}"
+            test -n "${worker_id}"
+            test "$(docker inspect --format '{{.State.Running}}' "${api_id}")" = "true"
+            test "$(docker inspect --format '{{.State.Running}}' "${worker_id}")" = "true"
+
+            ${COMPOSE} ps
+            trap - EXIT

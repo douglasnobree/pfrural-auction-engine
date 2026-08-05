@@ -12,6 +12,7 @@ export class ManagerService {
 
   async auctionCommand(auctionId: string, action: 'start' | 'pause' | 'resume' | 'finish', actorId: string, idempotencyKey: string, expectedVersion: bigint | undefined, correlationId: string): Promise<Record<string, unknown>> {
     const target: Record<typeof action, AuctionStatus> = { start: 'RUNNING', pause: 'PAUSED', resume: 'RUNNING', finish: 'FINISHED' };
+    if (action === 'finish') await this.closeScheduledPreBidLots(auctionId, actorId, correlationId);
     return this.database.transaction(async (client) => {
       const saved = await this.findAction(client, actorId, idempotencyKey);
       if (saved) return saved;
@@ -19,7 +20,7 @@ export class ManagerService {
       const auction = await client.auctionExecution.findUnique({ where: { id: auctionId } });
       if (!auction) throw new DomainError('AUCTION_NOT_FOUND', 'Auction not found', 404);
       if (expectedVersion !== undefined && expectedVersion !== auction.version) throw new DomainError('VERSION_CONFLICT', 'Auction version is stale', 409, { currentVersion: auction.version.toString() });
-      assertAuctionTransition(auction.status, target[action]);
+      assertAuctionTransition(auction.status, target[action], auction.mode);
       const version = auction.version + 1n;
       await client.auctionExecution.update({ where: { id: auctionId }, data: { status: target[action], version } });
       const response = { auctionId, externalAuctionId: auction.externalAuctionId, status: target[action], version: version.toString(), serverTime: new Date().toISOString() };
@@ -28,6 +29,13 @@ export class ManagerService {
       await appendDomainEvent(client, { eventType: `auction.${eventName}`, routingKey: `auction.${eventName}`, aggregateType: 'auction_execution', aggregateId: auctionId, auctionId, aggregateVersion: version, correlationId, actorId, payload: response, writeEventLog: false });
       return response;
     });
+  }
+
+  private async closeScheduledPreBidLots(auctionId: string, actorId: string, correlationId: string): Promise<void> {
+    const auction = await this.database.prisma.auctionExecution.findUnique({ where: { id: auctionId }, select: { mode: true, status: true } });
+    if (!auction || auction.mode === 'LIVE' || auction.status !== 'SCHEDULED') return;
+    const lots = await this.database.prisma.auctionLotExecution.findMany({ where: { auctionId, status: { in: ['OPEN', 'PAUSED', 'CLOSING'] } }, select: { id: true } });
+    for (const lot of lots) await this.bidding.closeLot(lot.id, correlationId, actorId);
   }
 
   async lotCommand(lotId: string, action: 'open' | 'pause' | 'resume' | 'announce' | 'withdraw', actorId: string, idempotencyKey: string, expectedVersion: bigint | undefined, correlationId: string): Promise<Record<string, unknown>> {

@@ -7,6 +7,7 @@ import { DomainError, isDomainError } from '../../domain/errors.js';
 import { participantAlias } from '../../domain/identity.js';
 import { evaluateProxyBid } from '../../domain/proxy-bid.js';
 import { parseCents } from '../../domain/money.js';
+import { assertBiddingWindow, isPreBidWindow } from '../../domain/bidding-window.js';
 import type { BidOrigin, ProxyEntry } from '../../domain/types.js';
 
 export interface PlaceBidInput {
@@ -65,7 +66,7 @@ export class BiddingService {
       const lot = await this.lockLot(client, input.lotId);
       try {
         await this.validateBid(client, lot, input, origin, amountCents);
-        if (lot.auction.mode === 'LIVE' && lot.auction.approvalMode === 'MANUAL_FIFO') {
+        if ((origin === 'ONLINE' || origin === 'PROXY') && lot.auction.mode === 'LIVE' && lot.auction.approvalMode === 'MANUAL_FIFO') {
           const pending = this.pendingResult(request.row.id, lot);
           await client.bidRequest.update({ where: { id: request.row.id }, data: { status: 'PENDING_APPROVAL', result: pending as unknown as Prisma.InputJsonValue } });
           await appendDomainEvent(client, {
@@ -211,16 +212,21 @@ export class BiddingService {
   }
 
   private async validateBid(client: PrismaTransaction, lot: LockedLot, input: PlaceBidInput, origin: BidOrigin, amountCents: bigint): Promise<void> {
-    if (!['TIMED', 'LIVE'].includes(lot.auction.mode)) throw new DomainError('WRONG_AUCTION_MODE', 'This lot does not accept bids', 422);
+    if (!['SHOPPING', 'TIMED', 'LIVE'].includes(lot.auction.mode)) throw new DomainError('WRONG_AUCTION_MODE', 'This lot does not accept bids', 422);
+    const preBidWindow = isPreBidWindow(lot.auction.mode, lot.auction.status, lot.auction.preBidEnabled);
+    try {
+      assertBiddingWindow({ mode: lot.auction.mode, status: lot.auction.status, preBidEnabled: lot.auction.preBidEnabled, preBidStartsAt: lot.auction.preBidStartsAt, preBidEndsAt: lot.auction.preBidEndsAt, auctionStartsAt: lot.auction.startsAt });
+    } catch (error) {
+      if (isDomainError(error)) throw error;
+      throw new DomainError('AUCTION_NOT_OPEN', 'Auction is not accepting bids', 409);
+    }
     if (lot.status !== 'OPEN') throw new DomainError('LOT_NOT_OPEN', 'Lot is not open for bids', 409);
     if (input.expectedVersion !== undefined && input.expectedVersion !== lot.version) throw new DomainError('VERSION_CONFLICT', 'Lot version is stale', 409, { currentVersion: lot.version.toString() });
     const now = Date.now();
-    if (lot.startsAt && now < lot.startsAt.getTime()) throw new DomainError('LOT_NOT_STARTED', 'Lot has not started', 409);
+    if (!preBidWindow && lot.startsAt && now < lot.startsAt.getTime()) throw new DomainError('LOT_NOT_STARTED', 'Lot has not started', 409);
     if (lot.endsAt && now >= lot.endsAt.getTime()) throw new DomainError('LOT_ENDED', 'Lot has ended', 409);
-    if (origin === 'ONLINE' || origin === 'PROXY') {
-      const registration = await client.auctionRegistration.findUnique({ where: { auctionId_userId: { auctionId: lot.auctionId, userId: input.userId } } });
-      if (registration?.status !== 'APPROVED') throw new DomainError('REGISTRATION_REQUIRED', 'Participant is not approved for this auction', 403);
-    }
+    const registration = await client.auctionRegistration.findUnique({ where: { auctionId_userId: { auctionId: lot.auctionId, userId: input.userId } } });
+    if (registration?.status !== 'APPROVED') throw new DomainError('REGISTRATION_REQUIRED', 'Participant is not approved for this auction', 403);
     if (amountCents <= 0n) throw new DomainError('INVALID_AMOUNT', 'Bid must be positive', 422);
   }
 

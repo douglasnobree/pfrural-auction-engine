@@ -1,5 +1,5 @@
 import { DomainError } from './errors.js';
-import type { AuctionStatus, LotStatus } from './types.js';
+import type { AuctionMode, AuctionStatus, LotStatus } from './types.js';
 
 const auctionTransitions: Record<AuctionStatus, AuctionStatus[]> = {
   DRAFT: ['REVIEW', 'CANCELLED'],
@@ -23,20 +23,23 @@ const lotTransitions: Record<LotStatus, LotStatus[]> = {
   CANCELLED: [],
 };
 
-export function allowedAuctionTransitions(from: AuctionStatus): AuctionStatus[] {
-  return [...auctionTransitions[from]];
+export function allowedAuctionTransitions(from: AuctionStatus, mode?: AuctionMode): AuctionStatus[] {
+  const transitions = [...auctionTransitions[from]];
+  if (from === 'SCHEDULED' && mode && mode !== 'LIVE') transitions.push('FINISHED');
+  return transitions;
 }
 
 export function allowedLotTransitions(from: LotStatus): LotStatus[] {
   return [...lotTransitions[from]];
 }
 
-export function assertAuctionTransition(from: AuctionStatus, to: AuctionStatus): void {
-  if (!auctionTransitions[from].includes(to)) {
+export function assertAuctionTransition(from: AuctionStatus, to: AuctionStatus, mode?: AuctionMode): void {
+  const allowedTransitions = allowedAuctionTransitions(from, mode);
+  if (!allowedTransitions.includes(to)) {
     throw new DomainError('INVALID_AUCTION_TRANSITION', `Auction cannot transition from ${from} to ${to}`, 409, {
       from,
       to,
-      allowedTransitions: allowedAuctionTransitions(from),
+      allowedTransitions,
     });
   }
 }

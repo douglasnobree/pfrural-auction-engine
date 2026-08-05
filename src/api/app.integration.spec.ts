@@ -35,7 +35,7 @@ describe.skipIf(!runIntegration)('auction engine API integration', () => {
       const firstRegistration = await app.inject(registration);
       const secondRegistration = await app.inject(registration);
       expect(firstRegistration.statusCode).toBe(200);
-      expect(secondRegistration.json().id).toBe(firstRegistration.json().id);
+      expect(secondRegistration.json().registrationId).toBe(firstRegistration.json().registrationId);
 
       const bid = {
         method: 'POST' as const,

@@ -97,3 +97,35 @@ O retorno fornece `externalAuctionId` para abrir `/leiloes/teste/<externalAuctio
 O backend atual continua dono de identidade, catálogo, mídia e CRUD. A rota existente `PATCH /api/auctions/:id/publish` sincroniza a execução no engine com idempotência; indisponibilidade do engine é registrada sem quebrar a publicação CRUD. As rotas integradas ficam em `/api/auction-engine/*`, com autenticação/session atual, comandos HTTPS idempotentes e consumidor RabbitMQ para projeção/inbox.
 
 O frontend adiciona o proxy `app/api/auction-engine/[...path]`, Server Actions, tipos/hooks de runtime, página pública compartilhada entre produção e sandbox, player mock de transmissão, board de habilitação/lance/proxy/reserva e control room de manager. O WebSocket entrega eventos e uma consulta automática de segurança mantém a tela atualizada; a resposta HTTPS e o snapshot continuam autoritativos.
+
+### Regras de negócio de lance
+
+- `TIMED` e `SHOPPING` são o fluxo de pré-lance: durante a janela configurada, o participante registrado pode ofertar por lote; o manager pode iniciar/pausar/retomar e encerrar o leilão pelo engine. `SHOPPING` é apenas a nomenclatura comercial e não substitui os lances por reserva.
+- `LIVE` pode receber pré-lances quando `preBidStartsAt`/`preBidEndsAt` forem enviados. Sem essas datas, os lotes ficam consultáveis, mas o lance só é liberado após `start`, quando o estado fica `RUNNING`.
+- Cada origem (`ONLINE`, `PROXY`, `FLOOR`, `PHONE`) exige cadastro aprovado para o participante-alvo. No FLOOR/PHONE o administrador é o ator da operação e o participante cadastrado continua sendo o dono do lance.
+- `LIVE` sempre possui etapa de transmissão após o início; pré-lance é opcional. `TIMED`/`SHOPPING` não dependem de transmissão.
+- A interface pede autenticação/registro no primeiro comando de lance. O preço, líder, sequência e histórico exibidos vêm do snapshot/evento do PostgreSQL; campos editáveis do CRUD são apenas projeções compatíveis.
+
+## Deploy pela GitHub Actions
+
+O workflow `.github/workflows/deploy.yml` faz deploy automaticamente em pushes para `main` e também pode ser executado manualmente em `Actions > Deploy auction engine > Run workflow`.
+
+Configure estes secrets no repositório:
+
+```text
+SSH_HOST  endereço ou IP da VPS
+SSH_USER  usuário SSH da VPS
+SSH_KEY   chave privada SSH correspondente ao authorized_keys da VPS
+SSH_PORT  opcional; padrão 22
+```
+
+Na VPS, o workflow espera:
+
+```text
+/apps/auction-engine/.env
+/apps/auction-engine/docker-compose.prod.yml
+```
+
+O Compose de produção precisa declarar os serviços `auction-postgres`, `auction-rabbitmq`, `auction-redis`, `auction-api` e `auction-worker`, todos com os mesmos nomes usados na VPS.
+
+O `.env` permanece somente na VPS. O deploy avança o checkout por fast-forward até o SHA exato que disparou a Action, valida o Compose, constrói API/worker e aguarda PostgreSQL, RabbitMQ e Redis saudáveis. Em seguida executa `prisma migrate deploy` em um container isolado, antes de iniciar a nova API, recria API/worker e valida `/ready`, AMQP e o estado dos dois processos. Em caso de falha, a Action imprime estado e logs dos serviços sem exibir o `.env`, remover volumes ou executar prune global.

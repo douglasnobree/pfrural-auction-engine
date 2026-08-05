@@ -8,6 +8,12 @@ describe('state machines', () => {
     expect(() => assertAuctionTransition('PAUSED', 'RUNNING')).not.toThrow();
   });
 
+  it('allows pre-bid auctions to finish without entering live mode', () => {
+    expect(() => assertAuctionTransition('SCHEDULED', 'FINISHED', 'TIMED')).not.toThrow();
+    expect(() => assertAuctionTransition('SCHEDULED', 'FINISHED', 'SHOPPING')).not.toThrow();
+    expect(() => assertAuctionTransition('SCHEDULED', 'FINISHED', 'LIVE')).toThrow();
+  });
+
   it('does not allow generic status jumps', () => {
     expect(() => assertAuctionTransition('DRAFT', 'FINISHED')).toThrow();
     expect(() => assertLotTransition('OPEN', 'SOLD')).toThrow();

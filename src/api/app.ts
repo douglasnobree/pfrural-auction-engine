@@ -4,7 +4,7 @@ import { z, ZodError } from 'zod';
 import { config } from '../config.js';
 import { DomainError } from '../domain/errors.js';
 import { actorFromRequest, correlationId, idempotencyKey, internalRequest, managerFromRequest, trustedDisplayName } from './auth.js';
-import { auctionParam, bidBody, currentLotBody, externalLotQuery, floorBidBody, idParam, lotParam, managerBody, parseBody, publishExecutionBody, proxyBidBody, rejectBody, registrationBody, reservationBody, sandboxBody, streamBody } from './contracts.js';
+import { auctionParam, bidBody, currentLotBody, externalLotQuery, floorBidBody, idParam, internalRegistrationBody, lotParam, managerBody, parseBody, publishExecutionBody, proxyBidBody, rejectBody, registrationApprovalBody, registrationBody, reservationBody, sandboxBody, streamBody } from './contracts.js';
 import { AuctionQueryService } from '../application/auctions/auction-query.service.js';
 import { BiddingService } from '../application/bidding/bidding.service.js';
 import { ManagerService } from '../application/manager/manager.service.js';
@@ -80,13 +80,20 @@ export async function createApp(context = createContext()): Promise<{ app: Fasti
   app.get('/v1/internal/lots/by-external/:externalLotId', async (request) => { internalRequest(request); const params = z.object({ externalLotId: z.string().min(1) }).parse(request.params); return context.queries.getLotByExternalId(externalLotQuery.parse(request.query).externalAuctionId, params.externalLotId); });
   app.post('/v1/internal/executions/publish', async (request) => { internalRequest(request); return context.executions.publish(parseBody(publishExecutionBody, request.body), correlationId(request)); });
   app.post('/v1/internal/sandbox/auctions', async (request) => { internalRequest(request); if (!config.SANDBOX_ENABLED || config.NODE_ENV === 'production') throw new DomainError('SANDBOX_DISABLED', 'Sandbox creation is disabled in this environment', 403); const body = parseBody(sandboxBody, request.body); return context.sandbox.create({ ...body, idempotencyKey: idempotencyKey(request) }, correlationId(request)); });
-  app.post('/v1/internal/auctions/by-external/:externalAuctionId/registrations', async (request) => { internalRequest(request); const actor = actorFromRequest(request); const { externalAuctionId } = request.params as { externalAuctionId: string }; const body = parseBody(registrationBody, request.body); const snapshot = await context.queries.getAuctionSnapshotByExternalId(externalAuctionId); const auctionId = (snapshot.auction as { id: string }).id; return context.registrations.register(auctionId, actor.userId, body.termsVersion, idempotencyKey(request), correlationId(request)); });
+  app.post('/v1/internal/auctions/by-external/:externalAuctionId/registrations', async (request) => { internalRequest(request); const actor = actorFromRequest(request); const { externalAuctionId } = request.params as { externalAuctionId: string }; const body = parseBody(internalRegistrationBody, request.body); const snapshot = await context.queries.getAuctionSnapshotByExternalId(externalAuctionId); const auctionId = (snapshot.auction as { id: string }).id; return context.registrations.register(auctionId, actor.userId, body.termsVersion, idempotencyKey(request), correlationId(request), body.globallyEnabled); });
   app.post('/v1/auctions/:auctionId/registrations', async (request) => {
     const actor = actorFromRequest(request); const { auctionId } = auctionParam.parse(request.params); const body = parseBody(registrationBody, request.body);
     return context.registrations.register(auctionId, actor.userId, body.termsVersion, idempotencyKey(request), correlationId(request));
   });
   app.get('/v1/auctions/:auctionId/registrations/me', async (request) => {
     const actor = actorFromRequest(request); const { auctionId } = auctionParam.parse(request.params); return context.registrations.getForUser(auctionId, actor.userId);
+  });
+  app.get('/v1/manager/auctions/:auctionId/registrations', async (request) => {
+    managerFromRequest(request); const { auctionId } = auctionParam.parse(request.params); return context.registrations.listForAuction(auctionId);
+  });
+  app.put('/v1/manager/auctions/:auctionId/registrations/:id', async (request) => {
+    const actor = managerFromRequest(request); const { auctionId } = auctionParam.parse(request.params); const { id } = idParam.parse(request.params); const body = parseBody(registrationApprovalBody, request.body);
+    return context.registrations.setEnabled(auctionId, id, body.enabled, actor.userId, idempotencyKey(request), correlationId(request));
   });
   app.post('/v1/lots/:lotId/bids', async (request) => {
     const actor = actorFromRequest(request); const { lotId } = lotParam.parse(request.params); const body = parseBody(bidBody, request.body);
@@ -119,7 +126,7 @@ export async function createApp(context = createContext()): Promise<{ app: Fasti
   });
   app.post('/v1/manager/lots/:lotId/floor-bids', async (request) => {
     const actor = managerFromRequest(request); const { lotId } = lotParam.parse(request.params); const body = parseBody(floorBidBody, request.body);
-    return context.bidding.placeBid({ lotId, userId: body.participantId, amountCents: body.amountCents, origin: body.origin, actorId: actor.userId, idempotencyKey: idempotencyKey(request), correlationId: correlationId(request) });
+    return context.bidding.placeBid({ lotId, userId: body.participantId, amountCents: body.amountCents, origin: body.origin, displayName: trustedDisplayName(request, body.displayName), actorId: actor.userId, idempotencyKey: idempotencyKey(request), correlationId: correlationId(request) });
   });
   app.post('/v1/manager/bids/:id/approve', async (request) => {
     const actor = managerFromRequest(request); return context.bidding.approveBidRequest(idParam.parse(request.params).id, actor.userId, correlationId(request));

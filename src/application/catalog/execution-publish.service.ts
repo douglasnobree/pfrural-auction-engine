@@ -10,6 +10,9 @@ export interface PublishExecutionInput {
   currency?: string;
   regulationVersion: string;
   approvalMode?: 'AUTOMATIC' | 'MANUAL_FIFO';
+  preBidEnabled?: boolean;
+  preBidStartsAt?: string | null;
+  preBidEndsAt?: string | null;
   startsAt?: string | null;
   endsAt?: string | null;
   lots: Array<{
@@ -38,21 +41,38 @@ export class ExecutionPublishService {
       if (!auction) {
         auction = await client.auctionExecution.create({ data: {
           externalAuctionId: input.externalAuctionId, title: input.title, mode: input.mode as PrismaAuctionMode, status: 'SCHEDULED', currency: input.currency ?? 'BRL', regulationVersion: input.regulationVersion,
-          approvalMode: input.approvalMode as PrismaApprovalMode | undefined, startsAt: input.startsAt ? new Date(input.startsAt) : null, endsAt: input.endsAt ? new Date(input.endsAt) : null,
+          approvalMode: input.approvalMode as PrismaApprovalMode | undefined, preBidEnabled: input.preBidEnabled ?? ['TIMED', 'SHOPPING'].includes(input.mode), preBidStartsAt: input.preBidStartsAt ? new Date(input.preBidStartsAt) : null, preBidEndsAt: input.preBidEndsAt ? new Date(input.preBidEndsAt) : null, startsAt: input.startsAt ? new Date(input.startsAt) : null, endsAt: input.endsAt ? new Date(input.endsAt) : null,
         } });
         created = true;
+      } else {
+        auction = await client.auctionExecution.update({ where: { id: auction.id }, data: {
+          title: input.title,
+          mode: input.mode as PrismaAuctionMode,
+          ...(input.currency ? { currency: input.currency } : {}),
+          regulationVersion: input.regulationVersion,
+          ...(input.approvalMode ? { approvalMode: input.approvalMode as PrismaApprovalMode } : {}),
+          preBidEnabled: input.preBidEnabled ?? ['TIMED', 'SHOPPING'].includes(input.mode),
+          ...(input.preBidStartsAt !== undefined ? { preBidStartsAt: input.preBidStartsAt ? new Date(input.preBidStartsAt) : null } : {}),
+          ...(input.preBidEndsAt !== undefined ? { preBidEndsAt: input.preBidEndsAt ? new Date(input.preBidEndsAt) : null } : {}),
+          ...(input.startsAt !== undefined ? { startsAt: input.startsAt ? new Date(input.startsAt) : null } : {}),
+          ...(input.endsAt !== undefined ? { endsAt: input.endsAt ? new Date(input.endsAt) : null } : {}),
+        } });
       }
       const lots: Array<{ id: string; externalLotId: string; status: string }> = [];
       for (const [index, inputLot] of input.lots.entries()) {
-        const lot = await client.auctionLotExecution.upsert({
+        const desiredStatus = (inputLot.status ?? (input.mode === 'LIVE' && index > 0 ? 'PAUSED' : 'OPEN')) as PrismaLotStatus;
+        let lot = await client.auctionLotExecution.upsert({
           where: { auctionId_externalLotId: { auctionId: auction.id, externalLotId: inputLot.externalLotId } },
           create: {
-            auctionId: auction.id, externalLotId: inputLot.externalLotId, lotNumber: inputLot.lotNumber, title: inputLot.title, status: (inputLot.status ?? (index === 0 ? 'OPEN' : 'PAUSED')) as PrismaLotStatus,
+            auctionId: auction.id, externalLotId: inputLot.externalLotId, lotNumber: inputLot.lotNumber, title: inputLot.title, status: desiredStatus,
             startingBidCents: BigInt(inputLot.startingBidCents ?? '0'), incrementCents: BigInt(inputLot.incrementCents ?? '1'), reservePriceCents: inputLot.reservePriceCents ? BigInt(inputLot.reservePriceCents) : null, fixedPriceCents: inputLot.fixedPriceCents ? BigInt(inputLot.fixedPriceCents) : null,
             quantity: inputLot.quantity ?? 1, availableQuantity: inputLot.quantity ?? 1, startsAt: inputLot.startsAt ? new Date(inputLot.startsAt) : null, endsAt: inputLot.endsAt ? new Date(inputLot.endsAt) : null,
           },
           update: { title: inputLot.title, lotNumber: inputLot.lotNumber },
         });
+        if (auction.status === 'SCHEDULED' && ['QUEUED', 'OPEN', 'PAUSED'].includes(lot.status) && lot.status !== desiredStatus) {
+          lot = await client.auctionLotExecution.update({ where: { id: lot.id }, data: { status: desiredStatus, version: { increment: 1 } } });
+        }
         lots.push({ id: lot.id, externalLotId: lot.externalLotId, status: lot.status });
       }
       if (created && lots[0]) await client.auctionExecution.update({ where: { id: auction.id }, data: { currentLotId: lots[0].id } });
