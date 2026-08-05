@@ -78,15 +78,20 @@ jobs:
               for attempt in $(seq 1 60); do
                 container_id="$(${COMPOSE} ps -q "${service}")"
                 status=""
+                running="false"
                 if [ -n "${container_id}" ]; then
                   status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' "${container_id}" 2>/dev/null || true)"
+                  running="$(docker inspect --format '{{.State.Running}}' "${container_id}" 2>/dev/null || true)"
                 fi
                 if [ "${status}" = "healthy" ]; then
                   return 0
                 fi
+                if [ "${status}" = "no-healthcheck" ] && [ "${running}" = "true" ]; then
+                  return 0
+                fi
                 sleep 2
               done
-              echo "Service ${service} did not become healthy" >&2
+              echo "Service ${service} did not become ready" >&2
               ${COMPOSE} logs --tail=100 "${service}" >&2 || true
               return 1
             }
@@ -94,6 +99,17 @@ jobs:
             wait_for_health auction-postgres
             wait_for_health auction-rabbitmq
             wait_for_health auction-redis
+
+            for attempt in $(seq 1 30); do
+              if [ "$(${COMPOSE} exec -T auction-redis redis-cli ping 2>/dev/null || true)" = "PONG" ]; then
+                break
+              fi
+              if [ "${attempt}" = "30" ]; then
+                echo "Redis did not answer PING" >&2
+                exit 1
+              fi
+              sleep 2
+            done
 
             # Apply migrations in an isolated one-off container before starting
             # the new API/worker image. This avoids booting code against an old schema.

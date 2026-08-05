@@ -17,7 +17,7 @@ Date: 2026-08-04
 - Redis is auxiliary only: rate limiting, presence and future fan-out. It is not used for the bid ledger.
 - RealtimeGateway issues one-use hashed tickets, sends connected/snapshot/event/replayed, reports resync_required, and supports reconnect by snapshot.
 - The worker publishes outbox events, consumes notification events and closes due lots idempotently.
-- `.github/workflows/deploy.yml` provides automatic deploys from `main` and manual dispatch through GitHub Actions. It preserves the VPS `.env` and production Compose file, deploys the exact triggering SHA, waits for PostgreSQL/RabbitMQ/Redis health, applies Prisma migrations in an isolated container before starting the new API/worker, then verifies readiness, AMQP and both process states. Failures include bounded service diagnostics without destructive cleanup.
+- `.github/workflows/deploy.yml` provides automatic deploys from `main` and manual dispatch through GitHub Actions. It preserves the VPS `.env` and production Compose file, deploys the exact triggering SHA, respects configured service healthchecks and verifies Redis with `redis-cli ping`, applies Prisma migrations in an isolated container before starting the new API/worker, then verifies readiness, AMQP and both process states. Failures include bounded service diagnostics without destructive cleanup.
 
 ### Existing backend integration
 
