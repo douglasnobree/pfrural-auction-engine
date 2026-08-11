@@ -4,7 +4,7 @@ import { z, ZodError } from 'zod';
 import { config } from '../config.js';
 import { DomainError } from '../domain/errors.js';
 import { actorFromRequest, correlationId, idempotencyKey, internalRequest, managerFromRequest, trustedDisplayName } from './auth.js';
-import { auctionParam, bidBody, currentLotBody, externalLotQuery, floorBidBody, idParam, internalRegistrationBody, lotParam, managerBody, parseBody, publishExecutionBody, proxyBidBody, rejectBody, registrationApprovalBody, registrationBody, reservationBody, sandboxBody, streamBody } from './contracts.js';
+import { auctionParam, bidBody, bidHistoryQuery, currentLotBody, externalLotQuery, floorBidBody, idParam, internalRegistrationBody, lotParam, managerBody, parseBody, publishExecutionBody, proxyBidBody, rejectBody, registrationApprovalBody, registrationBody, reservationBody, sandboxBody, streamBody } from './contracts.js';
 import { AuctionQueryService } from '../application/auctions/auction-query.service.js';
 import { BiddingService } from '../application/bidding/bidding.service.js';
 import { ManagerService } from '../application/manager/manager.service.js';
@@ -48,6 +48,7 @@ export function createContext(): AppContext {
 
 export async function createApp(context = createContext()): Promise<{ app: FastifyInstance; context: AppContext }> {
   const app = Fastify({ logger: { level: config.LOG_LEVEL } });
+  app.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string' }, (_request, body, done) => done(null, body));
   await app.register(cors, { origin: true });
   context.realtime = new RealtimeGateway(context.tickets, context.queries, context.hub);
   context.realtime.attach(app.server);
@@ -107,7 +108,11 @@ export async function createApp(context = createContext()): Promise<{ app: Fasti
     const actor = actorFromRequest(request); const { lotId } = lotParam.parse(request.params);
     return context.bidding.getActiveProxyBid(lotId, actor.userId);
   });
-  app.get('/v1/lots/:lotId/bids', async (request) => context.bidding.listEffectiveBids(lotParam.parse(request.params).lotId));
+  app.get('/v1/lots/:lotId/bids', async (request) => {
+    const { lotId } = lotParam.parse(request.params);
+    const query = bidHistoryQuery.parse(request.query);
+    return context.bidding.listEffectiveBids(lotId, query.beforeSequence, query.limit);
+  });
   app.post('/v1/realtime/tickets', async (request) => {
     const actor = actorFromRequest(request); const body = z.object({ auctionId: z.string().uuid() }).parse(request.body); await context.redis.markPresence(body.auctionId, actor.userId); return context.tickets.issue(body.auctionId, actor.userId, actor.roles);
   });
@@ -148,6 +153,7 @@ export async function createApp(context = createContext()): Promise<{ app: Fasti
     const correlation = correlationId(request);
     if (error instanceof ZodError) return reply.code(400).send({ error: { code: 'VALIDATION_ERROR', message: 'Request validation failed', details: error.flatten() }, correlationId: correlation });
     if (error instanceof DomainError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message, ...(error.details ? { details: error.details } : {}) }, correlationId: correlation });
+    if (typeof error === 'object' && error !== null && 'statusCode' in error && (error as { statusCode?: unknown }).statusCode === 415) return reply.code(415).send({ error: { code: 'UNSUPPORTED_MEDIA_TYPE', message: 'Content-Type is not supported' }, correlationId: correlation });
     request.log.error(error);
     return reply.code(500).send({ error: { code: 'INTERNAL_ERROR', message: 'Internal server error' }, correlationId: correlation });
   });

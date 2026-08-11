@@ -47,6 +47,8 @@ O seed cria um leilão `TIMED` e um lote aberto. Em desenvolvimento a identidade
 
 ## Contratos principais
 
+O historico de lances retorna `{ items, nextBeforeSequence, hasMore }`. Use `limit` (1-100) e `beforeSequence` para buscar itens efetivos mais antigos. Cada item contem `amountCents`, `origin`, `phase` (`PRE_BID` ou `LIVE_BID`), `lotSequence`, `acceptedAt`, `createdAt` e `bidderAlias`; a sequencia e do lote e nao deve ser tratada como indice da pagina.
+
 Todos os comandos de mutação exigem `Idempotency-Key` e aceitam `X-Correlation-Id`. Valores monetários são strings de centavos no JSON, por exemplo `"125000"` = R$ 1.250,00. Timestamps são ISO-8601 UTC.
 
 ```text

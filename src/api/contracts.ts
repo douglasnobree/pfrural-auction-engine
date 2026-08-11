@@ -3,6 +3,11 @@ import { z } from 'zod';
 export const idParam = z.object({ id: z.string().uuid() });
 export const lotParam = z.object({ lotId: z.string().uuid() });
 export const auctionParam = z.object({ auctionId: z.string().uuid() });
+const positiveHistoryLimit = z.string().regex(/^[1-9]\d*$/).transform(Number).refine((value) => value <= 100, 'limit must be between 1 and 100');
+export const bidHistoryQuery = z.object({
+  beforeSequence: z.string().regex(/^\d+$/).transform(BigInt).optional(),
+  limit: positiveHistoryLimit.optional(),
+});
 export const registrationBody = z.object({ termsVersion: z.string().trim().min(1).max(100) });
 export const internalRegistrationBody = registrationBody.extend({ globallyEnabled: z.boolean().optional() });
 export const registrationApprovalBody = z.object({ enabled: z.boolean() });

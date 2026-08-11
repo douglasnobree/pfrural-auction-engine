@@ -56,6 +56,10 @@ enum BidOrigin {
   FLOOR
   PHONE
 }
+enum BidPhase {
+  PRE_BID
+  LIVE_BID
+}
 enum SettlementStatus {
   PENDING
   PAYMENT_PENDING
@@ -172,6 +176,7 @@ model BidRequest {
   status               BidRequestStatus @default(RECEIVED)
   requestedAmountCents BigInt           @map("requested_amount_cents")
   origin               BidOrigin        @default(ONLINE)
+  phase                BidPhase?        @map("phase")
   actorId              String?          @map("actor_id")
   expectedVersion      BigInt?          @map("expected_version")
   result               Json?
@@ -194,6 +199,7 @@ model BidIntent {
   origin               BidOrigin
   requestedAmountCents BigInt           @map("requested_amount_cents")
   actorId              String?          @map("actor_id")
+  phase                BidPhase?        @map("phase")
   intentSequence       BigInt           @map("intent_sequence")
   receivedAt           DateTime         @default(now()) @map("received_at")
   approvedAt           DateTime?        @map("approved_at")
@@ -230,6 +236,7 @@ model EffectiveBid {
   bidIntent          BidIntent  @relation(fields: [bidIntentId], references: [id])
   userId             String     @map("user_id")
   origin             BidOrigin
+  phase              BidPhase?  @map("phase")
   amountCents        BigInt     @map("amount_cents")
   lotSequence        BigInt     @map("lot_sequence")
   causedByIntentId   String?    @map("caused_by_intent_id") @db.Uuid

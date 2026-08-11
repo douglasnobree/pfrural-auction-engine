@@ -8,7 +8,9 @@ describe('participant display identity', () => {
     );
   });
 
-  it('uses a readable generic label instead of exposing a hash', () => {
-    expect(participantAlias('auction-1', 'user-1')).toBe('Participante');
+  it('uses a stable per-auction anonymous label instead of exposing the user id', () => {
+    expect(participantAlias('auction-1', 'user-1')).toMatch(/^Participante [A-F0-9]{6}$/);
+    expect(participantAlias('auction-1', 'user-1')).toBe(participantAlias('auction-1', 'user-1'));
+    expect(participantAlias('auction-2', 'user-1')).not.toBe(participantAlias('auction-1', 'user-1'));
   });
 });

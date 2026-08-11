@@ -3,6 +3,7 @@ export type AuctionStatus = 'DRAFT' | 'REVIEW' | 'SCHEDULED' | 'RUNNING' | 'PAUS
 export type LotStatus = 'DRAFT' | 'QUEUED' | 'OPEN' | 'PAUSED' | 'CLOSING' | 'SOLD' | 'UNSOLD' | 'CANCELLED';
 export type ApprovalMode = 'AUTOMATIC' | 'MANUAL_FIFO';
 export type BidOrigin = 'ONLINE' | 'PROXY' | 'FLOOR' | 'PHONE';
+export type BidPhase = 'PRE_BID' | 'LIVE_BID';
 
 export interface ProxyEntry {
   userId: string;

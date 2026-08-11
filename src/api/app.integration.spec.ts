@@ -1,23 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import WebSocket from 'ws';
 import { createApp } from './app.js';
-import { Database } from '../infrastructure/database/db.js';
 
 const runIntegration = process.env.RUN_INTEGRATION_TESTS === 'true';
 
 describe.skipIf(!runIntegration)('auction engine API integration', () => {
   it('serves an authoritative snapshot and keeps registration/bid commands idempotent', async () => {
-    const database = new Database();
-    await database.connect();
-    const auction = await database.prisma.auctionExecution.findUniqueOrThrow({
-      where: { externalAuctionId: 'demo-timed' },
-      include: { lots: true },
-    });
-    const lot = auction.lots[0];
-    if (!lot) throw new Error('Seeded integration lot is missing');
-
     const { app, context } = await createApp();
     try {
+      const sandbox = await context.sandbox.create({ participantId: 'user-demo', lotCount: 1, idempotencyKey: 'integration-sandbox-contract-v3' }, 'integration-sandbox-contract-v3');
+      const sandboxAuctionId = String((sandbox as { auctionId: string }).auctionId);
+      const auction = await context.database.prisma.auctionExecution.findUniqueOrThrow({ where: { id: sandboxAuctionId }, include: { lots: true } });
+      const lot = auction.lots[0];
+      if (!lot) throw new Error('Sandbox integration lot is missing');
       await app.listen({ port: 0, host: '127.0.0.1' });
       const snapshot = await app.inject({
         method: 'GET',
@@ -30,7 +25,7 @@ describe.skipIf(!runIntegration)('auction engine API integration', () => {
         method: 'POST' as const,
         url: `/v1/auctions/${auction.id}/registrations`,
         headers: { 'x-user-id': 'user-demo', 'idempotency-key': 'integration-registration-v1' },
-        payload: { termsVersion: 'demo-v1' },
+        payload: { termsVersion: 'sandbox-v1' },
       };
       const firstRegistration = await app.inject(registration);
       const secondRegistration = await app.inject(registration);
@@ -40,13 +35,29 @@ describe.skipIf(!runIntegration)('auction engine API integration', () => {
       const bid = {
         method: 'POST' as const,
         url: `/v1/lots/${lot.id}/bids`,
-        headers: { 'x-user-id': 'user-demo', 'idempotency-key': 'integration-bid-v1' },
+        headers: { 'x-user-id': 'user-demo', 'idempotency-key': 'integration-bid-contract-v2' },
         payload: { amountCents: '999999' },
       };
       const firstBid = await app.inject(bid);
       const secondBid = await app.inject(bid);
       expect(firstBid.statusCode).toBe(200);
-      expect(secondBid.json().bidIntentId).toBe(firstBid.json().bidIntentId);
+      expect(secondBid.json().bidRequestId).toBe(firstBid.json().bidRequestId);
+
+      const history = await app.inject({ method: 'GET', url: `/v1/lots/${lot.id}/bids?limit=10` });
+      expect(history.statusCode).toBe(200);
+      expect(history.json()).toMatchObject({ hasMore: false, nextBeforeSequence: null });
+      expect(history.json().items[0]).toMatchObject({
+        bidRequestId: firstBid.json().bidRequestId,
+        amountCents: '999999',
+        origin: 'ONLINE',
+        phase: 'LIVE_BID',
+        lotSequence: expect.any(String),
+        acceptedAt: expect.any(String),
+        createdAt: expect.any(String),
+        bidderAlias: expect.stringMatching(/^Participante [A-F0-9]{6}$/),
+      });
+      const invalidHistoryLimit = await app.inject({ method: 'GET', url: `/v1/lots/${lot.id}/bids?limit=101` });
+      expect(invalidHistoryLimit.statusCode).toBe(400);
 
       const ticket = await context.tickets.issue(auction.id, 'user-ws', []);
       const address = app.server.address();
@@ -93,7 +104,6 @@ describe.skipIf(!runIntegration)('auction engine API integration', () => {
       await context.rabbit.close();
       await context.redis.close();
       await context.database.close();
-      await database.close();
     }
   });
 });
