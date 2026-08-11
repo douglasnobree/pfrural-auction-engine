@@ -71,4 +71,38 @@ describe('RegistrationService', () => {
     expect(client.managerAction.create).toHaveBeenCalledWith({ data: expect.objectContaining({ action: 'enable-registration', idempotencyKey: 'approval-key' }) });
     expect(client.outboxEvent.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ eventType: 'registration.approved' }) }));
   });
+
+  it('returns manager registrations with a stable cursor over acceptedAt and id', async () => {
+    const firstAcceptedAt = new Date('2026-08-11T15:00:00.000Z');
+    const secondAcceptedAt = new Date('2026-08-11T15:00:00.000Z');
+    const registrations = [
+      { id: '11111111-1111-4111-8111-111111111111', userId: 'user-a', status: 'PENDING', termsVersion: 'terms-v1', acceptedAt: firstAcceptedAt },
+      { id: '22222222-2222-4222-8222-222222222222', userId: 'user-b', status: 'APPROVED', termsVersion: 'terms-v1', acceptedAt: secondAcceptedAt },
+    ];
+    const firstRegistration = registrations[0]!;
+    const findMany = vi.fn().mockResolvedValue(registrations);
+    const client = {
+      auctionExecution: { findUnique: vi.fn().mockResolvedValue({ id: 'auction-id' }) },
+      auctionRegistration: { findMany },
+    };
+    const service = serviceWithClient(client);
+
+    const firstPage = await service.listForAuction('auction-id', { limit: 1 });
+
+    expect(firstPage.items).toHaveLength(1);
+    expect(firstPage.hasMore).toBe(true);
+    expect(firstPage.nextCursor).toEqual(expect.any(String));
+
+    await service.listForAuction('auction-id', { cursor: firstPage.nextCursor!, limit: 1 });
+    expect(findMany).toHaveBeenLastCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        OR: [
+          { acceptedAt: { gt: firstAcceptedAt } },
+          { acceptedAt: firstAcceptedAt, id: { gt: firstRegistration.id } },
+        ],
+      }),
+      orderBy: [{ acceptedAt: 'asc' }, { id: 'asc' }],
+      take: 2,
+    }));
+  });
 });

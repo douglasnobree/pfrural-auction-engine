@@ -4,9 +4,21 @@ import { DomainError } from '../../domain/errors.js';
 import { centsToJson } from '../../domain/money.js';
 import { participantAlias } from '../../domain/identity.js';
 
-function readableBidderName(alias: string | null): string | null {
-  if (!alias || /^Participante [A-F0-9]{6}$/.test(alias)) return null;
-  return alias;
+function publicBidderAlias(auctionId: string, userId: string | null): string | null {
+  return userId ? participantAlias(auctionId, userId) : null;
+}
+
+function sanitizePublicEventPayload(payload: Record<string, unknown>): Record<string, unknown> {
+  const sanitized = { ...payload };
+  if ('currentBidderName' in sanitized) sanitized.currentBidderName = null;
+  if ('winnerName' in sanitized && typeof sanitized.winnerName === 'string') sanitized.winnerName = null;
+  if (
+    typeof sanitized.currentBidderAlias === 'string' &&
+    !/^Participante [A-F0-9]{6}$/.test(sanitized.currentBidderAlias)
+  ) {
+    sanitized.currentBidderAlias = 'Participante';
+  }
+  return sanitized;
 }
 
 export class AuctionQueryService {
@@ -42,9 +54,9 @@ export class AuctionQueryService {
         startsAt: asDate(lot.startsAt)?.toISOString() ?? null, endsAt: asDate(lot.endsAt)?.toISOString() ?? null,
         currentPriceCents: centsToJson(lot.currentPriceCents === null ? null : asBigInt(lot.currentPriceCents)),
         nextBidCents: (lot.currentPriceCents === null ? (lot.startingBidCents > 0n ? lot.startingBidCents : lot.incrementCents) : lot.currentPriceCents + lot.incrementCents).toString(),
-        currentBidderAlias: lot.currentBidderAlias,
-        currentBidderName: readableBidderName(lot.currentBidderAlias),
-        winnerName: lot.winnerAward ? readableBidderName(lot.currentBidderAlias) : null,
+        currentBidderAlias: publicBidderAlias(auction.id, lot.currentBidderId),
+        currentBidderName: null,
+        winnerName: lot.winnerAward ? publicBidderAlias(auction.id, lot.currentBidderId) : null,
         winningAmountCents: lot.winnerAward ? lot.winnerAward.winningAmountCents.toString() : null,
         closedAt: ['SOLD', 'UNSOLD', 'CANCELLED'].includes(lot.status) ? lot.updatedAt.toISOString() : null,
         lotSequence: asBigInt(lot.lotSequence).toString(), version: asBigInt(lot.version).toString(),
@@ -61,7 +73,8 @@ export class AuctionQueryService {
   async getLotByExternalId(externalAuctionId: string, externalLotId: string): Promise<{ id: string; auctionId: string; mode: string; status: string; currentPriceCents: string | null; currentBidderAlias: string | null; currentBidderName: string | null; winnerName: string | null; winningAmountCents: string | null; lotSequence: string; version: string; endsAt: string | null }> {
     const lot = await this.database.prisma.auctionLotExecution.findFirst({ where: { externalLotId, auction: { externalAuctionId } }, include: { auction: true, winnerAward: true } });
     if (!lot) throw new DomainError('LOT_NOT_FOUND', 'Lot not found', 404);
-    return { id: lot.id, auctionId: lot.auctionId, mode: lot.auction.mode, status: lot.status, currentPriceCents: lot.currentPriceCents?.toString() ?? null, currentBidderAlias: lot.currentBidderAlias, currentBidderName: readableBidderName(lot.currentBidderAlias), winnerName: lot.winnerAward ? readableBidderName(lot.currentBidderAlias) : null, winningAmountCents: lot.winnerAward?.winningAmountCents.toString() ?? null, lotSequence: lot.lotSequence.toString(), version: lot.version.toString(), endsAt: lot.endsAt?.toISOString() ?? null };
+    const bidderAlias = publicBidderAlias(lot.auctionId, lot.currentBidderId);
+    return { id: lot.id, auctionId: lot.auctionId, mode: lot.auction.mode, status: lot.status, currentPriceCents: lot.currentPriceCents?.toString() ?? null, currentBidderAlias: bidderAlias, currentBidderName: null, winnerName: lot.winnerAward ? bidderAlias : null, winningAmountCents: lot.winnerAward?.winningAmountCents.toString() ?? null, lotSequence: lot.lotSequence.toString(), version: lot.version.toString(), endsAt: lot.endsAt?.toISOString() ?? null };
   }
 
   async getLot(lotId: string): Promise<{ id: string; auctionId: string; mode: string; status: string; currentPriceCents: string | null; currentBidderAlias: string | null; currentBidderName: string | null; winnerName: string | null; winningAmountCents: string | null; lotSequence: string; version: string; endsAt: string | null }> {
@@ -70,9 +83,9 @@ export class AuctionQueryService {
     return {
       id: lot.id, auctionId: lot.auctionId, mode: lot.auction.mode, status: lot.status,
       currentPriceCents: lot.currentPriceCents === null ? null : asBigInt(lot.currentPriceCents).toString(),
-      currentBidderAlias: lot.currentBidderAlias, lotSequence: asBigInt(lot.lotSequence).toString(), version: asBigInt(lot.version).toString(),
-      currentBidderName: readableBidderName(lot.currentBidderAlias),
-      winnerName: lot.winnerAward ? readableBidderName(lot.currentBidderAlias) : null,
+      currentBidderAlias: publicBidderAlias(lot.auctionId, lot.currentBidderId), lotSequence: asBigInt(lot.lotSequence).toString(), version: asBigInt(lot.version).toString(),
+      currentBidderName: null,
+      winnerName: lot.winnerAward ? publicBidderAlias(lot.auctionId, lot.currentBidderId) : null,
       winningAmountCents: lot.winnerAward?.winningAmountCents.toString() ?? null,
       endsAt: lot.endsAt?.toISOString() ?? null,
     };
@@ -80,7 +93,7 @@ export class AuctionQueryService {
 
   async getEvents(lotId: string, since: bigint, limit = 500): Promise<Array<Record<string, unknown>>> {
     const result = await this.database.prisma.auctionEventLog.findMany({ where: { lotId, lotSequence: { gt: since } }, orderBy: { lotSequence: 'asc' }, take: limit });
-    return result.map((row) => ({ ...(row.payload as Record<string, unknown>), lotSequence: row.lotSequence?.toString() ?? null }));
+    return result.map((row) => ({ ...sanitizePublicEventPayload(row.payload as Record<string, unknown>), lotSequence: row.lotSequence?.toString() ?? null }));
   }
 
   async getAuctionIdForLot(lotId: string): Promise<string> {

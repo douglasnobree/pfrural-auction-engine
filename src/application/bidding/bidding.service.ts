@@ -129,7 +129,7 @@ export class BiddingService {
       const first = await client.bidRequest.findFirst({ where: { lotId: request.lotId, status: 'PENDING_APPROVAL' }, orderBy: [{ receivedAt: 'asc' }, { id: 'asc' }] });
       if (first?.id !== request.id) throw new DomainError('APPROVAL_NOT_FIFO', 'Only the oldest pending bid can be approved', 409);
       const lot = await this.lockLot(client, request.lotId);
-      const phase = (request.phase as BidPhase | null) ?? this.phaseFor(lot);
+      const phase = storedBidPhase(request.phase as BidPhase | null);
       await this.validateBid(client, lot, { lotId: lot.id, userId: request.userId, amountCents: request.requestedAmountCents.toString(), idempotencyKey: request.id, correlationId, displayName: request.displayName ?? undefined }, request.origin, request.requestedAmountCents);
       return this.acceptRequestLocked(client, lot, request.id, request.requestedAmountCents, request.origin, phase, { lotId: lot.id, userId: request.userId, amountCents: request.requestedAmountCents.toString(), idempotencyKey: request.id, correlationId, actorId, displayName: request.displayName ?? undefined }, actorId);
     });
@@ -147,7 +147,7 @@ export class BiddingService {
       }
       if (request.status !== 'PENDING_APPROVAL') throw new DomainError('BID_NOT_PENDING', 'Bid request is not pending approval', 409);
       const lot = await this.lockLot(client, request.lotId);
-      const rejected = this.rejectedResult(request.id, lot, request.phase as BidPhase | null ?? this.phaseFor(lot), 'MANAGER_REJECTED');
+      const rejected = this.rejectedResult(request.id, lot, storedBidPhase(request.phase as BidPhase | null), 'MANAGER_REJECTED');
       await client.bidRequest.update({ where: { id: request.id }, data: { status: 'REJECTED', errorCode: 'MANAGER_REJECTED', result: rejected as unknown as Prisma.InputJsonValue, completedAt: new Date() } });
       await appendDomainEvent(client, {
         eventType: 'bid.rejected', routingKey: 'bid.rejected', aggregateType: 'bid_request', aggregateId: request.id,
@@ -186,9 +186,9 @@ export class BiddingService {
       await client.auctionLotExecution.update({ where: { id: lot.id }, data: { status, lotSequence: nextSequence, version: newVersion } });
       const payload = {
         lotId: lot.id, externalLotId: lot.externalLotId, status, lotSequence: nextSequence.toString(), version: newVersion.toString(),
-        currentPriceCents: lot.currentPriceCents?.toString() ?? null, currentBidderAlias: lot.currentBidderAlias,
-        currentBidderName: lot.currentBidderAlias && lot.currentBidderAlias !== 'Participante' ? lot.currentBidderAlias : null,
-        winnerName: sold && lot.currentBidderAlias && lot.currentBidderAlias !== 'Participante' ? lot.currentBidderAlias : null,
+        currentPriceCents: lot.currentPriceCents?.toString() ?? null, currentBidderAlias: winner ? participantAlias(lot.auctionId, winner) : null,
+        currentBidderName: null,
+        winnerName: sold && winner ? participantAlias(lot.auctionId, winner) : null,
         winningAmountCents: sold ? lot.currentPriceCents?.toString() ?? null : null,
         closedAt: new Date().toISOString(),
         winnerDeclared: sold, awardId, settlementId, serverTime: new Date().toISOString(),
@@ -199,7 +199,7 @@ export class BiddingService {
       });
       if (sold && awardId) await appendDomainEvent(client, {
         eventType: 'winner.declared', routingKey: 'winner.declared', aggregateType: 'winner_award', aggregateId: awardId,
-        auctionId: lot.auctionId, lotId: lot.id, correlationId, actorId, payload: { lotId: lot.id, externalLotId: lot.externalLotId, awardId, settlementId, winnerName: lot.currentBidderAlias && lot.currentBidderAlias !== 'Participante' ? lot.currentBidderAlias : null, winningAmountCents: lot.currentPriceCents?.toString() ?? null }, writeEventLog: false,
+        auctionId: lot.auctionId, lotId: lot.id, correlationId, actorId, payload: { lotId: lot.id, externalLotId: lot.externalLotId, awardId, settlementId, winnerName: winner ? participantAlias(lot.auctionId, winner) : null, winningAmountCents: lot.currentPriceCents?.toString() ?? null }, writeEventLog: false,
       });
       return payload;
     });
@@ -322,12 +322,13 @@ export class BiddingService {
       ...(origin === 'PROXY' ? { proxyMaxBidCents: amountCents.toString() } : {}),
       ...(effectiveBidId ? { effectiveBidId } : {}), ...(timerExtended ? { timerExtended: true } : {}),
     };
-    await client.bidRequest.update({ where: { id: bidRequestId }, data: { status: 'ACCEPTED', phase: phase as PrismaBidPhase, result: result as unknown as Prisma.InputJsonValue, completedAt: acceptedAt } });
+    await client.bidRequest.update({ where: { id: bidRequestId }, data: { status: 'ACCEPTED', result: result as unknown as Prisma.InputJsonValue, completedAt: acceptedAt } });
+    const publicBidderAlias = participantAlias(lot.auctionId, evaluation.leader.userId);
     await appendDomainEvent(client, {
       eventType: 'bid.accepted', routingKey: 'bid.accepted', aggregateType: 'auction_lot_execution', aggregateId: lot.id,
       auctionId: lot.auctionId, lotId: lot.id, aggregateVersion: newVersion, lotSequence: nextSequence,
       correlationId: input.correlationId, causationId: bidRequestId, actorId: approvalActorId ?? input.actorId,
-      payload: { bidRequestId, lotId: lot.id, externalLotId: lot.externalLotId, lotSequence: nextSequence.toString(), version: newVersion.toString(), currentPriceCents: effectivePriceCents.toString(), nextBidCents: (effectivePriceCents + lot.incrementCents).toString(), currentBidderAlias: participantAlias(lot.auctionId, evaluation.leader.userId, evaluation.leader.displayName), currentBidderName: evaluation.leader.displayName ?? null, bidOrigin: evaluation.leader.origin, phase, acceptedAt: acceptedAt.toISOString(), endsAt: endsAt?.toISOString() ?? null, timerExtended, serverTime: result.serverTime },
+      payload: { bidRequestId, lotId: lot.id, externalLotId: lot.externalLotId, lotSequence: nextSequence.toString(), version: newVersion.toString(), currentPriceCents: effectivePriceCents.toString(), nextBidCents: (effectivePriceCents + lot.incrementCents).toString(), currentBidderAlias: publicBidderAlias, currentBidderName: null, bidOrigin: evaluation.leader.origin, phase, acceptedAt: acceptedAt.toISOString(), endsAt: endsAt?.toISOString() ?? null, timerExtended, serverTime: result.serverTime },
     });
     return result;
   }
@@ -348,4 +349,9 @@ export class BiddingService {
     const award = await client.winnerAward.findUnique({ where: { lotId: lot.id }, include: { settlement: true } });
     return { lotId: lot.id, status: lot.status, lotSequence: lot.lotSequence.toString(), version: lot.version.toString(), currentPriceCents: lot.currentPriceCents?.toString() ?? null, currentBidderAlias: lot.currentBidderAlias, awardId: award?.id ?? null, settlementId: award?.settlement?.id ?? null };
   }
+}
+
+export function storedBidPhase(phase: BidPhase | null | undefined): BidPhase {
+  if (phase === 'PRE_BID' || phase === 'LIVE_BID') return phase;
+  throw new DomainError('BID_PHASE_MISSING', 'Historical bid phase is missing', 409);
 }

@@ -1,6 +1,18 @@
 import { Database } from '../../infrastructure/database/db.js';
 import { appendDomainEvent } from '../../infrastructure/events/envelope.js';
 import { DomainError } from '../../domain/errors.js';
+import { decodeRegistrationCursor, encodeRegistrationCursor } from './registration-cursor.js';
+
+export interface RegistrationListQuery {
+  cursor?: string;
+  limit?: number;
+}
+
+export interface RegistrationPage {
+  items: Array<Record<string, unknown>>;
+  nextCursor: string | null;
+  hasMore: boolean;
+}
 import { Prisma } from '@prisma/client';
 
 export class RegistrationService {
@@ -41,11 +53,28 @@ export class RegistrationService {
     return registration ? { registrationId: registration.id, auctionId, userId, status: registration.status, termsVersion: registration.termsVersion, acceptedAt: registration.acceptedAt.toISOString() } : null;
   }
 
-  async listForAuction(auctionId: string): Promise<Array<Record<string, unknown>>> {
+  async listForAuction(auctionId: string, query: RegistrationListQuery = {}): Promise<RegistrationPage> {
     const auction = await this.database.prisma.auctionExecution.findUnique({ where: { id: auctionId }, select: { id: true } });
     if (!auction) throw new DomainError('AUCTION_NOT_FOUND', 'Auction not found', 404);
-    const registrations = await this.database.prisma.auctionRegistration.findMany({ where: { auctionId }, orderBy: [{ acceptedAt: 'asc' }, { id: 'asc' }] });
-    return registrations.map((registration) => ({
+    const limit = Math.min(Math.max(query.limit ?? 50, 1), 100);
+    const cursor = query.cursor ? decodeRegistrationCursor(query.cursor) : undefined;
+    const registrations = await this.database.prisma.auctionRegistration.findMany({
+      where: {
+        auctionId,
+        ...(cursor
+          ? {
+              OR: [
+                { acceptedAt: { gt: new Date(cursor.acceptedAt) } },
+                { acceptedAt: new Date(cursor.acceptedAt), id: { gt: cursor.id } },
+              ],
+            }
+          : {}),
+      },
+      orderBy: [{ acceptedAt: 'asc' }, { id: 'asc' }],
+      take: limit + 1,
+    });
+    const hasMore = registrations.length > limit;
+    const items = registrations.slice(0, limit).map((registration) => ({
       registrationId: registration.id,
       auctionId,
       userId: registration.userId,
@@ -54,6 +83,12 @@ export class RegistrationService {
       termsVersion: registration.termsVersion,
       acceptedAt: registration.acceptedAt.toISOString(),
     }));
+    const last = registrations.at(limit - 1);
+    return {
+      items,
+      nextCursor: hasMore && last ? encodeRegistrationCursor(last.acceptedAt, last.id) : null,
+      hasMore,
+    };
   }
 
   async setEnabled(auctionId: string, registrationId: string, enabled: boolean, actorId: string, idempotencyKey: string, correlationId: string): Promise<Record<string, unknown>> {

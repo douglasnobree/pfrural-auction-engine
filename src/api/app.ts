@@ -4,7 +4,7 @@ import { z, ZodError } from 'zod';
 import { config } from '../config.js';
 import { DomainError } from '../domain/errors.js';
 import { actorFromRequest, correlationId, idempotencyKey, internalRequest, managerFromRequest, trustedDisplayName } from './auth.js';
-import { auctionParam, bidBody, bidHistoryQuery, currentLotBody, externalLotQuery, floorBidBody, idParam, internalRegistrationBody, lotParam, managerBody, parseBody, publishExecutionBody, proxyBidBody, rejectBody, registrationApprovalBody, registrationBody, reservationBody, sandboxBody, streamBody } from './contracts.js';
+import { auctionParam, bidBody, bidHistoryQuery, currentLotBody, externalLotQuery, floorBidBody, idParam, internalRegistrationBody, lotParam, managerBody, parseBody, publishExecutionBody, proxyBidBody, rejectBody, registrationApprovalBody, registrationBody, registrationListQuery, reservationBody, sandboxBody, streamBody } from './contracts.js';
 import { AuctionQueryService } from '../application/auctions/auction-query.service.js';
 import { BiddingService } from '../application/bidding/bidding.service.js';
 import { ManagerService } from '../application/manager/manager.service.js';
@@ -90,7 +90,7 @@ export async function createApp(context = createContext()): Promise<{ app: Fasti
     const actor = actorFromRequest(request); const { auctionId } = auctionParam.parse(request.params); return context.registrations.getForUser(auctionId, actor.userId);
   });
   app.get('/v1/manager/auctions/:auctionId/registrations', async (request) => {
-    managerFromRequest(request); const { auctionId } = auctionParam.parse(request.params); return context.registrations.listForAuction(auctionId);
+    managerFromRequest(request); const { auctionId } = auctionParam.parse(request.params); const query = registrationListQuery.parse(request.query); return context.registrations.listForAuction(auctionId, query);
   });
   app.put('/v1/manager/auctions/:auctionId/registrations/:id', async (request) => {
     const actor = managerFromRequest(request); const { auctionId } = auctionParam.parse(request.params); const { id } = idParam.parse(request.params); const body = parseBody(registrationApprovalBody, request.body);
