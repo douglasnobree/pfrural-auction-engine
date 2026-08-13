@@ -185,6 +185,7 @@ model BidRequest {
   completedAt          DateTime?        @map("completed_at")
   intent               BidIntent?
   @@unique([lotId, userId, idempotencyKey])
+  @@index([status, receivedAt])
   @@map("bid_request")
 }
 

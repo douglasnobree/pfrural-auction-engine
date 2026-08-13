@@ -4,7 +4,7 @@ import { z, ZodError } from 'zod';
 import { config } from '../config.js';
 import { DomainError } from '../domain/errors.js';
 import { actorFromRequest, correlationId, idempotencyKey, internalRequest, managerFromRequest, trustedDisplayName } from './auth.js';
-import { auctionParam, bidBody, bidHistoryQuery, currentLotBody, externalLotQuery, floorBidBody, idParam, internalRegistrationBody, lotParam, managerBody, parseBody, publishExecutionBody, proxyBidBody, rejectBody, registrationApprovalBody, registrationBody, registrationListQuery, reservationBody, sandboxBody, streamBody } from './contracts.js';
+import { auctionParam, bidBody, bidHistoryQuery, currentLotBody, externalLotQuery, floorBidBody, idParam, internalRegistrationBody, lotParam, managerBody, parseBody, pendingBidsQuery, publishExecutionBody, proxyBidBody, rejectBody, registrationApprovalBody, registrationBody, registrationListQuery, reservationBody, sandboxBody, streamBody } from './contracts.js';
 import { AuctionQueryService } from '../application/auctions/auction-query.service.js';
 import { BiddingService } from '../application/bidding/bidding.service.js';
 import { ManagerService } from '../application/manager/manager.service.js';
@@ -131,13 +131,17 @@ export async function createApp(context = createContext()): Promise<{ app: Fasti
   });
   app.post('/v1/manager/lots/:lotId/floor-bids', async (request) => {
     const actor = managerFromRequest(request); const { lotId } = lotParam.parse(request.params); const body = parseBody(floorBidBody, request.body);
-    return context.bidding.placeBid({ lotId, userId: body.participantId, amountCents: body.amountCents, origin: body.origin, displayName: trustedDisplayName(request, body.displayName), actorId: actor.userId, idempotencyKey: idempotencyKey(request), correlationId: correlationId(request) });
+    return context.bidding.placeBid({ lotId, userId: body.participantId, amountCents: body.amountCents, expectedVersion: body.expectedVersion ? BigInt(body.expectedVersion) : undefined, origin: body.origin, displayName: trustedDisplayName(request, body.displayName), actorId: actor.userId, idempotencyKey: idempotencyKey(request), correlationId: correlationId(request) });
+  });
+  app.get('/v1/manager/auctions/:auctionId/pending-bids', async (request) => {
+    managerFromRequest(request); const { auctionId } = auctionParam.parse(request.params); const query = pendingBidsQuery.parse(request.query);
+    return context.bidding.listPendingApprovals(auctionId, query.lotId, query.limit);
   });
   app.post('/v1/manager/bids/:id/approve', async (request) => {
-    const actor = managerFromRequest(request); return context.bidding.approveBidRequest(idParam.parse(request.params).id, actor.userId, correlationId(request));
+    const actor = managerFromRequest(request); return context.bidding.approveBidRequest(idParam.parse(request.params).id, actor.userId, idempotencyKey(request), correlationId(request));
   });
   app.post('/v1/manager/bids/:id/reject', async (request) => {
-    const actor = managerFromRequest(request); const body = parseBody(rejectBody, request.body); return context.bidding.rejectBidRequest(idParam.parse(request.params).id, actor.userId, body.reason, correlationId(request));
+    const actor = managerFromRequest(request); const body = parseBody(rejectBody, request.body); return context.bidding.rejectBidRequest(idParam.parse(request.params).id, actor.userId, body.reason, idempotencyKey(request), correlationId(request));
   });
   app.put('/v1/manager/auctions/:auctionId/current-lot', async (request) => {
     const actor = managerFromRequest(request); const { auctionId } = auctionParam.parse(request.params); const body = parseBody(currentLotBody, request.body); return context.manager.setCurrentLot(auctionId, body.lotId, actor.userId, idempotencyKey(request), body.expectedVersion ? BigInt(body.expectedVersion) : undefined, correlationId(request));

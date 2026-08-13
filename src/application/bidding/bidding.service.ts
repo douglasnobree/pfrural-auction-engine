@@ -64,6 +64,21 @@ export interface BidHistoryPage {
   hasMore: boolean;
 }
 
+export interface PendingBidApproval {
+  bidRequestId: string;
+  lotId: string;
+  externalLotId: string;
+  lotNumber: number;
+  lotTitle: string;
+  participantId: string;
+  displayName: string | null;
+  amountCents: string;
+  origin: BidOrigin;
+  phase: BidPhase | null;
+  status: 'PENDING_APPROVAL';
+  receivedAt: string;
+}
+
 export class BiddingService {
   constructor(private readonly database: Database) {}
 
@@ -115,14 +130,21 @@ export class BiddingService {
     return result;
   }
 
-  async approveBidRequest(bidRequestId: string, actorId: string, correlationId: string): Promise<BidCommandResult> {
+  async approveBidRequest(bidRequestId: string, actorId: string, idempotencyKey: string, correlationId: string): Promise<BidCommandResult> {
     return this.database.transaction(async (client) => {
+      const saved = await client.managerAction.findUnique({ where: { actorId_idempotencyKey: { actorId, idempotencyKey } } });
+      if (saved) {
+        if (saved.targetId !== bidRequestId) throw new DomainError('IDEMPOTENCY_KEY_REUSED', 'Idempotency-Key was already used for another approval', 409);
+        const savedResult = asJson<BidCommandResult>(saved.result);
+        if (savedResult) return savedResult;
+      }
       await client.$queryRaw`SELECT id FROM bid_request WHERE id = ${bidRequestId}::uuid FOR UPDATE`;
       const request = await client.bidRequest.findUnique({ where: { id: bidRequestId } });
       if (!request) throw new DomainError('BID_REQUEST_NOT_FOUND', 'Bid request not found', 404);
       if (request.status === 'ACCEPTED') {
         const result = asJson<BidCommandResult>(request.result);
         if (!result) throw new DomainError('BID_RESULT_MISSING', 'Accepted bid result is missing', 500);
+        await this.saveManagerBidAction(client, actorId, idempotencyKey, 'approve-bid', bidRequestId, result);
         return result;
       }
       if (request.status !== 'PENDING_APPROVAL') throw new DomainError('BID_NOT_PENDING', 'Bid request is not pending approval', 409);
@@ -131,19 +153,30 @@ export class BiddingService {
       const lot = await this.lockLot(client, request.lotId);
       const phase = storedBidPhase(request.phase as BidPhase | null);
       await this.validateBid(client, lot, { lotId: lot.id, userId: request.userId, amountCents: request.requestedAmountCents.toString(), idempotencyKey: request.id, correlationId, displayName: request.displayName ?? undefined }, request.origin, request.requestedAmountCents);
-      return this.acceptRequestLocked(client, lot, request.id, request.requestedAmountCents, request.origin, phase, { lotId: lot.id, userId: request.userId, amountCents: request.requestedAmountCents.toString(), idempotencyKey: request.id, correlationId, actorId, displayName: request.displayName ?? undefined }, actorId);
+      const result = await this.acceptRequestLocked(client, lot, request.id, request.requestedAmountCents, request.origin, phase, { lotId: lot.id, userId: request.userId, amountCents: request.requestedAmountCents.toString(), idempotencyKey: request.id, correlationId, actorId, displayName: request.displayName ?? undefined }, actorId);
+      await this.saveManagerBidAction(client, actorId, idempotencyKey, 'approve-bid', bidRequestId, result);
+      return result;
     });
   }
 
-  async rejectBidRequest(bidRequestId: string, actorId: string, reason: string, correlationId: string): Promise<BidCommandResult> {
+  async rejectBidRequest(bidRequestId: string, actorId: string, reason: string, idempotencyKey: string, correlationId: string): Promise<BidCommandResult> {
     if (reason.trim().length < 3) throw new DomainError('REJECTION_REASON_REQUIRED', 'A rejection reason is required', 400);
     return this.database.transaction(async (client) => {
+      const saved = await client.managerAction.findUnique({ where: { actorId_idempotencyKey: { actorId, idempotencyKey } } });
+      if (saved) {
+        if (saved.targetId !== bidRequestId) throw new DomainError('IDEMPOTENCY_KEY_REUSED', 'Idempotency-Key was already used for another rejection', 409);
+        const savedResult = asJson<BidCommandResult>(saved.result);
+        if (savedResult) return savedResult;
+      }
       await client.$queryRaw`SELECT id FROM bid_request WHERE id = ${bidRequestId}::uuid FOR UPDATE`;
       const request = await client.bidRequest.findUnique({ where: { id: bidRequestId } });
       if (!request) throw new DomainError('BID_REQUEST_NOT_FOUND', 'Bid request not found', 404);
       if (request.status === 'REJECTED') {
         const saved = asJson<BidCommandResult>(request.result);
-        if (saved) return saved;
+        if (saved) {
+          await this.saveManagerBidAction(client, actorId, idempotencyKey, 'reject-bid', bidRequestId, saved, { reason });
+          return saved;
+        }
       }
       if (request.status !== 'PENDING_APPROVAL') throw new DomainError('BID_NOT_PENDING', 'Bid request is not pending approval', 409);
       const lot = await this.lockLot(client, request.lotId);
@@ -154,6 +187,7 @@ export class BiddingService {
         auctionId: lot.auctionId, lotId: lot.id, correlationId, actorId,
         payload: { bidRequestId: request.id, lotId: lot.id, externalLotId: lot.externalLotId, code: 'MANAGER_REJECTED', reason }, writeEventLog: false,
       });
+      await this.saveManagerBidAction(client, actorId, idempotencyKey, 'reject-bid', bidRequestId, rejected, { reason });
       return rejected;
     });
   }
@@ -225,6 +259,40 @@ export class BiddingService {
       bidderAlias: participantAlias(row.lot.auctionId, row.userId, row.bidIntent.displayName),
     }));
     return { items, nextBeforeSequence: hasMore ? items.at(-1)?.lotSequence ?? null : null, hasMore };
+  }
+
+  async listPendingApprovals(auctionId: string, lotId?: string, limit = 100): Promise<{ items: PendingBidApproval[]; hasMore: boolean }> {
+    const rows = await this.database.prisma.bidRequest.findMany({
+      where: { status: 'PENDING_APPROVAL', lot: { auctionId, ...(lotId ? { id: lotId } : {}) } },
+      include: { lot: { select: { externalLotId: true, lotNumber: true, title: true } } },
+      orderBy: [{ receivedAt: 'asc' }, { id: 'asc' }],
+      take: limit + 1,
+    });
+    return {
+      hasMore: rows.length > limit,
+      items: rows.slice(0, limit).map((row) => ({
+        bidRequestId: row.id,
+        lotId: row.lotId,
+        externalLotId: row.lot.externalLotId,
+        lotNumber: row.lot.lotNumber,
+        lotTitle: row.lot.title,
+        participantId: row.userId,
+        displayName: row.displayName,
+        amountCents: row.requestedAmountCents.toString(),
+        origin: row.origin,
+        phase: row.phase as BidPhase | null,
+        status: 'PENDING_APPROVAL',
+        receivedAt: row.receivedAt.toISOString(),
+      })),
+    };
+  }
+
+  private async saveManagerBidAction(client: PrismaTransaction, actorId: string, idempotencyKey: string, action: string, bidRequestId: string, result: BidCommandResult, payload: Record<string, unknown> = {}): Promise<void> {
+    try {
+      await client.managerAction.create({ data: { actorId, action, targetType: 'bid_request', targetId: bidRequestId, idempotencyKey, payload: payload as Prisma.InputJsonValue, result: result as unknown as Prisma.InputJsonValue } });
+    } catch (error) {
+      if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') throw error;
+    }
   }
 
   private async findOrCreateRequest(client: PrismaTransaction, input: PlaceBidInput, amountCents: bigint, origin: BidOrigin, phase: BidPhase): Promise<{ row: { id: string; requestedAmountCents: bigint; result: unknown; receivedAt: Date; phase: PrismaBidPhase | null }; existing: boolean }> {
