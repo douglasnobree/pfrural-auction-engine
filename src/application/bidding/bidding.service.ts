@@ -56,12 +56,33 @@ export interface BidHistoryItem {
   acceptedAt: string;
   createdAt: string;
   bidderAlias: string;
+  status: 'ACTIVE' | 'VOIDED';
+  voidedAt?: string;
+  voidReason?: string;
+  management?: { canEdit: boolean; canDelete: boolean; isLatest: boolean; mode: 'BID' | 'PROXY'; proxyMaxBidCents?: string };
 }
 
 export interface BidHistoryPage {
   items: BidHistoryItem[];
   nextBeforeSequence: string | null;
   hasMore: boolean;
+}
+
+export interface BidManagementResult {
+  status: 'UPDATED' | 'VOIDED';
+  bidId: string;
+  bidRequestId: string;
+  lotId: string;
+  amountCents: string;
+  previousAmountCents?: string;
+  proxyMaxBidCents?: string;
+  currentPriceCents: string | null;
+  nextBidCents: string;
+  currentBidderAlias: string | null;
+  lotSequence: string;
+  version: string;
+  reason: string;
+  serverTime: string;
 }
 
 export interface PendingBidApproval {
@@ -239,14 +260,17 @@ export class BiddingService {
     });
   }
 
-  async listEffectiveBids(lotId: string, beforeSequence?: bigint, limit = 50): Promise<BidHistoryPage> {
+  async listEffectiveBids(lotId: string, beforeSequence?: bigint, limit = 50, includeVoided = false): Promise<BidHistoryPage> {
+    const lot = includeVoided ? await this.database.prisma.auctionLotExecution.findUnique({ where: { id: lotId }, select: { status: true, winnerAward: { select: { id: true } }, proxyBids: { where: { active: true }, select: { userId: true, maxBidCents: true } } } }) : null;
+    const latestActive = includeVoided ? await this.database.prisma.effectiveBid.findFirst({ where: { lotId, voidedAt: null }, orderBy: { lotSequence: 'desc' }, select: { id: true } }) : null;
     const rows = await this.database.prisma.effectiveBid.findMany({
-      where: { lotId, ...(beforeSequence !== undefined ? { lotSequence: { lt: beforeSequence } } : {}) },
+      where: { lotId, ...(includeVoided ? {} : { voidedAt: null }), ...(beforeSequence !== undefined ? { lotSequence: { lt: beforeSequence } } : {}) },
       include: { lot: { select: { auctionId: true } }, bidIntent: { select: { bidRequestId: true, displayName: true, phase: true, approvedAt: true } } },
       orderBy: { lotSequence: 'desc' },
       take: limit + 1,
     });
     const hasMore = rows.length > limit;
+    const canManage = Boolean(lot && ['OPEN', 'PAUSED', 'CLOSING'].includes(lot.status) && !lot.winnerAward);
     const items = rows.slice(0, limit).map((row) => ({
       id: row.id,
       bidRequestId: row.bidIntent.bidRequestId,
@@ -257,8 +281,160 @@ export class BiddingService {
       acceptedAt: row.bidIntent.approvedAt?.toISOString() ?? row.createdAt.toISOString(),
       createdAt: row.createdAt.toISOString(),
       bidderAlias: participantAlias(row.lot.auctionId, row.userId, row.bidIntent.displayName),
+      status: row.voidedAt ? 'VOIDED' as const : 'ACTIVE' as const,
+      ...(includeVoided && row.voidedAt ? { voidedAt: row.voidedAt.toISOString(), ...(row.voidReason ? { voidReason: row.voidReason } : {}) } : {}),
+      ...(includeVoided ? {
+        management: {
+          canEdit: canManage && !row.voidedAt,
+          canDelete: canManage && !row.voidedAt,
+          isLatest: latestActive?.id === row.id,
+          mode: row.origin === 'PROXY' ? 'PROXY' as const : 'BID' as const,
+          ...(row.origin === 'PROXY' ? { proxyMaxBidCents: lot?.proxyBids.find((proxy) => proxy.userId === row.userId)?.maxBidCents.toString() } : {}),
+        },
+      } : {}),
     }));
     return { items, nextBeforeSequence: hasMore ? items.at(-1)?.lotSequence ?? null : null, hasMore };
+  }
+
+  async listManagerEffectiveBids(lotId: string, beforeSequence?: bigint, limit = 50): Promise<BidHistoryPage> {
+    return this.listEffectiveBids(lotId, beforeSequence, limit, true);
+  }
+
+  async updateManagerBid(bidId: string, amountInput: unknown, reason: string, actorId: string, idempotencyKey: string, correlationId: string, expectedVersion?: bigint): Promise<BidManagementResult> {
+    const amountCents = parseCents(amountInput);
+    if (reason.trim().length < 3) throw new DomainError('MANAGEMENT_REASON_REQUIRED', 'A management reason is required', 400);
+    return this.database.transaction(async (client) => {
+      const saved = await this.loadManagerMutation(client, actorId, idempotencyKey, bidId);
+      if (saved) return saved;
+      const { lot, bid, proxy, isLatest } = await this.prepareManagerBid(client, bidId, expectedVersion);
+      if (bid.origin === 'PROXY') {
+        if (!proxy) throw new DomainError('BID_PROXY_NOT_ACTIVE', 'The automatic ceiling for this bid is no longer active', 409);
+        if (proxy.maxBidCents === amountCents) throw new DomainError('BID_NO_CHANGE', 'The updated automatic ceiling must be different', 422);
+        if (lot.currentPriceCents !== null && amountCents < lot.currentPriceCents) throw new DomainError('BID_PROXY_BELOW_CURRENT_PRICE', 'The automatic ceiling cannot be below the current price', 422, { currentPriceCents: lot.currentPriceCents.toString() });
+        const now = new Date();
+        const nextSequence = lot.lotSequence + 1n;
+        const newVersion = lot.version + 1n;
+        await client.proxyBid.update({ where: { id: proxy.id }, data: { maxBidCents: amountCents } });
+        await client.auctionLotExecution.update({ where: { id: lot.id }, data: { lotSequence: nextSequence, version: newVersion } });
+        const result: BidManagementResult = {
+          status: 'UPDATED', bidId: bid.id, bidRequestId: bid.bidIntent.bidRequestId, lotId: lot.id,
+          amountCents: bid.amountCents.toString(), previousAmountCents: bid.amountCents.toString(), proxyMaxBidCents: amountCents.toString(),
+          currentPriceCents: lot.currentPriceCents?.toString() ?? null, nextBidCents: this.nextBidCents(lot.currentPriceCents, lot.startingBidCents, lot.incrementCents),
+          currentBidderAlias: lot.currentBidderAlias, lotSequence: nextSequence.toString(), version: newVersion.toString(), reason: reason.trim(), serverTime: now.toISOString(),
+        };
+        await appendDomainEvent(client, {
+          eventType: 'bid.updated', routingKey: 'bid.updated', aggregateType: 'auction_lot_execution', aggregateId: lot.id,
+          auctionId: lot.auctionId, lotId: lot.id, aggregateVersion: newVersion, lotSequence: nextSequence, correlationId, causationId: bid.bidIntent.bidRequestId, actorId,
+          payload: { bidId: bid.id, bidRequestId: bid.bidIntent.bidRequestId, lotId: lot.id, origin: 'PROXY', proxyMaxBidCents: amountCents.toString(), currentPriceCents: lot.currentPriceCents?.toString() ?? null, reason: reason.trim(), lotSequence: nextSequence.toString(), version: newVersion.toString() },
+        });
+        await this.saveManagerMutation(client, actorId, idempotencyKey, 'update-proxy-bid', bid.id, expectedVersion, result, { reason: reason.trim(), proxyMaxBidCents: amountCents.toString() });
+        return result;
+      }
+      if (bid.amountCents === amountCents) throw new DomainError('BID_NO_CHANGE', 'The updated amount must be different', 422);
+      const previous = await client.effectiveBid.findFirst({ where: { lotId: lot.id, voidedAt: null, lotSequence: { lt: bid.lotSequence } }, orderBy: { lotSequence: 'desc' } });
+      const next = await client.effectiveBid.findFirst({ where: { lotId: lot.id, voidedAt: null, lotSequence: { gt: bid.lotSequence } }, orderBy: { lotSequence: 'asc' } });
+      const minimum = isLatest
+        ? (previous ? previous.amountCents + lot.incrementCents : (lot.startingBidCents > 0n ? lot.startingBidCents : lot.incrementCents))
+        : (previous?.amountCents ?? (lot.startingBidCents > 0n ? lot.startingBidCents : lot.incrementCents));
+      if (amountCents < minimum) throw new DomainError('BID_BELOW_MINIMUM', 'The updated amount is below the next valid bid', 422, { minimumAmountCents: minimum.toString() });
+      if (next && amountCents > next.amountCents) throw new DomainError('BID_HISTORY_ORDER_INVALID', 'An older bid cannot exceed the following active bid', 422, { maximumAmountCents: next.amountCents.toString() });
+      if (isLatest) {
+        const activeProxy = await client.proxyBid.findFirst({ where: { lotId: lot.id, active: true, userId: { not: bid.userId } }, select: { maxBidCents: true } });
+        if (activeProxy && amountCents <= activeProxy.maxBidCents) throw new DomainError('BID_BELOW_ACTIVE_PROXY', 'The updated bid must remain above the active automatic ceiling', 422, { activeProxyMaxBidCents: activeProxy.maxBidCents.toString() });
+      }
+      const now = new Date();
+      const nextSequence = lot.lotSequence + 1n;
+      const newVersion = lot.version + 1n;
+      const bidderAlias = participantAlias(lot.auctionId, bid.userId, bid.bidIntent.displayName);
+      await client.effectiveBid.update({ where: { id: bid.id }, data: { amountCents } });
+      await client.bidIntent.update({ where: { id: bid.bidIntentId }, data: { requestedAmountCents: amountCents } });
+      await client.bidRequest.update({ where: { id: bid.bidIntent.bidRequestId }, data: { requestedAmountCents: amountCents } });
+      await client.auctionLotExecution.update({ where: { id: lot.id }, data: isLatest
+        ? { currentPriceCents: amountCents, currentBidderId: bid.userId, currentBidderAlias: bidderAlias, lotSequence: nextSequence, version: newVersion }
+        : { lotSequence: nextSequence, version: newVersion } });
+      const result: BidManagementResult = {
+        status: 'UPDATED', bidId: bid.id, bidRequestId: bid.bidIntent.bidRequestId, lotId: lot.id,
+        amountCents: amountCents.toString(), previousAmountCents: bid.amountCents.toString(), currentPriceCents: isLatest ? amountCents.toString() : lot.currentPriceCents?.toString() ?? null,
+        nextBidCents: this.nextBidCents(isLatest ? amountCents : lot.currentPriceCents, lot.startingBidCents, lot.incrementCents), currentBidderAlias: isLatest ? bidderAlias : lot.currentBidderAlias,
+        lotSequence: nextSequence.toString(), version: newVersion.toString(), reason: reason.trim(), serverTime: now.toISOString(),
+      };
+      await appendDomainEvent(client, {
+        eventType: 'bid.updated', routingKey: 'bid.updated', aggregateType: 'auction_lot_execution', aggregateId: lot.id,
+        auctionId: lot.auctionId, lotId: lot.id, aggregateVersion: newVersion, lotSequence: nextSequence, correlationId, causationId: bid.bidIntent.bidRequestId, actorId,
+        payload: { bidId: bid.id, bidRequestId: bid.bidIntent.bidRequestId, lotId: lot.id, previousAmountCents: bid.amountCents.toString(), amountCents: amountCents.toString(), reason: reason.trim(), isLatest, currentPriceCents: isLatest ? amountCents.toString() : lot.currentPriceCents?.toString() ?? null, currentBidderAlias: isLatest ? participantAlias(lot.auctionId, bid.userId) : lot.currentBidderAlias, lotSequence: nextSequence.toString(), version: newVersion.toString() },
+      });
+      await this.saveManagerMutation(client, actorId, idempotencyKey, 'update-bid', bid.id, expectedVersion, result, { reason: reason.trim(), previousAmountCents: bid.amountCents.toString(), amountCents: amountCents.toString() });
+      return result;
+    });
+  }
+
+  async voidManagerBid(bidId: string, reason: string, actorId: string, idempotencyKey: string, correlationId: string, expectedVersion?: bigint): Promise<BidManagementResult> {
+    if (reason.trim().length < 3) throw new DomainError('MANAGEMENT_REASON_REQUIRED', 'A management reason is required', 400);
+    return this.database.transaction(async (client) => {
+      const saved = await this.loadManagerMutation(client, actorId, idempotencyKey, bidId);
+      if (saved) return saved;
+      const { lot, bid, proxy, isLatest } = await this.prepareManagerBid(client, bidId, expectedVersion);
+      const current = await client.effectiveBid.findFirst({ where: { lotId: lot.id, voidedAt: null, id: { not: bid.id } }, include: { bidIntent: { select: { displayName: true } } }, orderBy: { lotSequence: 'desc' } });
+      const now = new Date();
+      const nextSequence = lot.lotSequence + 1n;
+      const newVersion = lot.version + 1n;
+      const currentPriceCents = current?.amountCents ?? null;
+      const currentBidderAlias = current ? participantAlias(lot.auctionId, current.userId, current.bidIntent.displayName) : null;
+      if (proxy && isLatest) await client.proxyBid.update({ where: { id: proxy.id }, data: { active: false } });
+      await client.effectiveBid.update({ where: { id: bid.id }, data: { voidedAt: now, voidedBy: actorId, voidReason: reason.trim() } });
+      await client.auctionLotExecution.update({ where: { id: lot.id }, data: { currentPriceCents, currentBidderId: current?.userId ?? null, currentBidderAlias, lotSequence: nextSequence, version: newVersion } });
+      const result: BidManagementResult = {
+        status: 'VOIDED', bidId: bid.id, bidRequestId: bid.bidIntent.bidRequestId, lotId: lot.id,
+        amountCents: bid.amountCents.toString(), currentPriceCents: currentPriceCents?.toString() ?? null,
+        nextBidCents: this.nextBidCents(currentPriceCents, lot.startingBidCents, lot.incrementCents), currentBidderAlias,
+        lotSequence: nextSequence.toString(), version: newVersion.toString(), reason: reason.trim(), serverTime: now.toISOString(),
+      };
+      await appendDomainEvent(client, {
+        eventType: 'bid.voided', routingKey: 'bid.voided', aggregateType: 'auction_lot_execution', aggregateId: lot.id,
+        auctionId: lot.auctionId, lotId: lot.id, aggregateVersion: newVersion, lotSequence: nextSequence, correlationId, causationId: bid.bidIntent.bidRequestId, actorId,
+        payload: { bidId: bid.id, bidRequestId: bid.bidIntent.bidRequestId, lotId: lot.id, origin: bid.origin, voidedAmountCents: bid.amountCents.toString(), isLatest, ...(proxy && isLatest ? { proxyId: proxy.id } : {}), reason: reason.trim(), currentPriceCents: currentPriceCents?.toString() ?? null, currentBidderAlias: current ? participantAlias(lot.auctionId, current.userId) : null, lotSequence: nextSequence.toString(), version: newVersion.toString() },
+      });
+      await this.saveManagerMutation(client, actorId, idempotencyKey, 'void-bid', bid.id, expectedVersion, result, { reason: reason.trim(), voidedAmountCents: bid.amountCents.toString() });
+      return result;
+    });
+  }
+
+  private async prepareManagerBid(client: PrismaTransaction, bidId: string, expectedVersion?: bigint): Promise<{ lot: LockedLot; bid: Prisma.EffectiveBidGetPayload<{ include: { bidIntent: true } }>; proxy: { id: string; maxBidCents: bigint } | null; isLatest: boolean }> {
+    const initial = await client.effectiveBid.findUnique({ where: { id: bidId }, include: { bidIntent: true } });
+    if (!initial) throw new DomainError('BID_NOT_FOUND', 'Bid not found', 404);
+    const lot = await this.lockLot(client, initial.lotId);
+    if (expectedVersion !== undefined && expectedVersion !== lot.version) throw new DomainError('VERSION_CONFLICT', 'Lot version is stale', 409, { currentVersion: lot.version.toString() });
+    if (!['OPEN', 'PAUSED', 'CLOSING'].includes(lot.status)) throw new DomainError('BID_MANAGEMENT_CLOSED', 'Bids cannot be managed after the lot is closed', 409);
+    const award = await client.winnerAward.findUnique({ where: { lotId: lot.id }, select: { id: true } });
+    if (award) throw new DomainError('BID_MANAGEMENT_CLOSED', 'Bids cannot be managed after a winner is declared', 409);
+    const bid = await client.effectiveBid.findUnique({ where: { id: bidId }, include: { bidIntent: true } });
+    if (!bid) throw new DomainError('BID_NOT_FOUND', 'Bid not found', 404);
+    if (bid.voidedAt) throw new DomainError('BID_ALREADY_VOIDED', 'This bid has already been voided', 409);
+    const latest = await client.effectiveBid.findFirst({ where: { lotId: lot.id, voidedAt: null }, orderBy: { lotSequence: 'desc' }, select: { id: true } });
+    const proxy = bid.origin === 'PROXY' ? await client.proxyBid.findFirst({ where: { lotId: lot.id, userId: bid.userId, active: true }, orderBy: { createdAt: 'desc' }, select: { id: true, maxBidCents: true } }) : null;
+    if (bid.origin === 'PROXY' && !proxy) throw new DomainError('BID_PROXY_NOT_ACTIVE', 'The automatic ceiling for this bid is no longer active', 409);
+    return { lot, bid, proxy, isLatest: latest?.id === bid.id };
+  }
+
+  private async loadManagerMutation(client: PrismaTransaction, actorId: string, idempotencyKey: string, bidId: string): Promise<BidManagementResult | null> {
+    const saved = await client.managerAction.findUnique({ where: { actorId_idempotencyKey: { actorId, idempotencyKey } } });
+    if (!saved) return null;
+    if (saved.targetId !== bidId) throw new DomainError('IDEMPOTENCY_KEY_REUSED', 'Idempotency-Key was already used for another bid', 409);
+    const result = asJson<BidManagementResult>(saved.result);
+    if (!result) throw new DomainError('COMMAND_IN_PROGRESS', 'The command is already being processed', 409);
+    return result;
+  }
+
+  private async saveManagerMutation(client: PrismaTransaction, actorId: string, idempotencyKey: string, action: string, bidId: string, expectedVersion: bigint | undefined, result: BidManagementResult, payload: Record<string, unknown>): Promise<void> {
+    try {
+      await client.managerAction.create({ data: { actorId, action, targetType: 'effective_bid', targetId: bidId, idempotencyKey, expectedVersion, payload: payload as Prisma.InputJsonValue, result: result as unknown as Prisma.InputJsonValue } });
+    } catch (error) {
+      if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') throw error;
+    }
+  }
+
+  private nextBidCents(currentPriceCents: bigint | null, startingBidCents: bigint, incrementCents: bigint): string {
+    return (currentPriceCents === null ? (startingBidCents > 0n ? startingBidCents : incrementCents) : currentPriceCents + incrementCents).toString();
   }
 
   async listPendingApprovals(auctionId: string, lotId?: string, limit = 100): Promise<{ items: PendingBidApproval[]; hasMore: boolean }> {

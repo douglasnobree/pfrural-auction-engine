@@ -242,9 +242,13 @@ model EffectiveBid {
   lotSequence        BigInt     @map("lot_sequence")
   causedByIntentId   String?    @map("caused_by_intent_id") @db.Uuid
   causedByIntent     BidIntent? @relation("CausedByIntent", fields: [causedByIntentId], references: [id])
+  voidedAt           DateTime?  @map("voided_at")
+  voidedBy           String?    @map("voided_by")
+  voidReason         String?    @map("void_reason")
   winnerAwards       WinnerAward[]
   createdAt          DateTime   @default(now()) @map("created_at")
   @@unique([lotId, lotSequence])
+  @@index([lotId, voidedAt, lotSequence])
   @@map("effective_bid")
 }
 

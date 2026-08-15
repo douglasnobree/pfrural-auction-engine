@@ -4,7 +4,7 @@ import { z, ZodError } from 'zod';
 import { config } from '../config.js';
 import { DomainError } from '../domain/errors.js';
 import { actorFromRequest, correlationId, idempotencyKey, internalRequest, managerFromRequest, trustedDisplayName } from './auth.js';
-import { auctionParam, bidBody, bidHistoryQuery, currentLotBody, externalLotQuery, floorBidBody, idParam, internalRegistrationBody, lotParam, managerBody, parseBody, pendingBidsQuery, publishExecutionBody, proxyBidBody, rejectBody, registrationApprovalBody, registrationBody, registrationListQuery, reservationBody, sandboxBody, streamBody } from './contracts.js';
+import { auctionParam, bidBody, bidHistoryQuery, bidManagementDeleteBody, bidManagementUpdateBody, currentLotBody, externalLotQuery, floorBidBody, idParam, internalRegistrationBody, lotParam, managerBody, parseBody, pendingBidsQuery, publishExecutionBody, proxyBidBody, rejectBody, registrationApprovalBody, registrationBody, registrationListQuery, reservationBody, sandboxBody, streamBody } from './contracts.js';
 import { AuctionQueryService } from '../application/auctions/auction-query.service.js';
 import { BiddingService } from '../application/bidding/bidding.service.js';
 import { ManagerService } from '../application/manager/manager.service.js';
@@ -56,7 +56,7 @@ export async function createApp(context = createContext()): Promise<{ app: Fasti
 
   app.addHook('onRequest', async (request, reply) => {
     const pathname = request.url.split('?')[0] ?? '';
-    const isCommand = request.method === 'POST' || request.method === 'PUT';
+    const isCommand = request.method === 'POST' || request.method === 'PUT' || request.method === 'PATCH' || request.method === 'DELETE';
     const isRateLimited = isCommand && (
       pathname.includes('/bids') ||
       pathname.includes('/proxy-bid') ||
@@ -137,11 +137,23 @@ export async function createApp(context = createContext()): Promise<{ app: Fasti
     managerFromRequest(request); const { auctionId } = auctionParam.parse(request.params); const query = pendingBidsQuery.parse(request.query);
     return context.bidding.listPendingApprovals(auctionId, query.lotId, query.limit);
   });
+  app.get('/v1/manager/lots/:lotId/bids', async (request) => {
+    managerFromRequest(request); const { lotId } = lotParam.parse(request.params); const query = bidHistoryQuery.parse(request.query);
+    return context.bidding.listManagerEffectiveBids(lotId, query.beforeSequence, query.limit);
+  });
   app.post('/v1/manager/bids/:id/approve', async (request) => {
     const actor = managerFromRequest(request); return context.bidding.approveBidRequest(idParam.parse(request.params).id, actor.userId, idempotencyKey(request), correlationId(request));
   });
   app.post('/v1/manager/bids/:id/reject', async (request) => {
     const actor = managerFromRequest(request); const body = parseBody(rejectBody, request.body); return context.bidding.rejectBidRequest(idParam.parse(request.params).id, actor.userId, body.reason, idempotencyKey(request), correlationId(request));
+  });
+  app.patch('/v1/manager/bids/:id', async (request) => {
+    const actor = managerFromRequest(request); const { id } = idParam.parse(request.params); const body = parseBody(bidManagementUpdateBody, request.body);
+    return context.bidding.updateManagerBid(id, body.amountCents, body.reason, actor.userId, idempotencyKey(request), correlationId(request), body.expectedVersion ? BigInt(body.expectedVersion) : undefined);
+  });
+  app.delete('/v1/manager/bids/:id', async (request) => {
+    const actor = managerFromRequest(request); const { id } = idParam.parse(request.params); const body = parseBody(bidManagementDeleteBody, request.body);
+    return context.bidding.voidManagerBid(id, body.reason, actor.userId, idempotencyKey(request), correlationId(request), body.expectedVersion ? BigInt(body.expectedVersion) : undefined);
   });
   app.put('/v1/manager/auctions/:auctionId/current-lot', async (request) => {
     const actor = managerFromRequest(request); const { auctionId } = auctionParam.parse(request.params); const body = parseBody(currentLotBody, request.body); return context.manager.setCurrentLot(auctionId, body.lotId, actor.userId, idempotencyKey(request), body.expectedVersion ? BigInt(body.expectedVersion) : undefined, correlationId(request));
