@@ -48,7 +48,7 @@ export class AuctionQueryService {
       } : null,
       lots: auction.lots.map((lot) => ({
         id: lot.id, externalId: lot.externalLotId, lotNumber: lot.lotNumber, title: lot.title, status: lot.status,
-        startingBidCents: asBigInt(lot.startingBidCents).toString(), incrementCents: asBigInt(lot.incrementCents).toString(),
+        startingBidCents: asBigInt(lot.startingBidCents).toString(), incrementCents: asBigInt(lot.incrementCents).toString(), secondaryIncrementCents: lot.secondaryIncrementCents == null ? null : asBigInt(lot.secondaryIncrementCents).toString(),
         fixedPriceCents: lot.fixedPriceCents === null ? null : asBigInt(lot.fixedPriceCents).toString(),
         quantity: lot.quantity, availableQuantity: lot.availableQuantity,
         startsAt: asDate(lot.startsAt)?.toISOString() ?? null, endsAt: asDate(lot.endsAt)?.toISOString() ?? null,

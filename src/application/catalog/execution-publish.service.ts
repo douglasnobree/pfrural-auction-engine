@@ -22,6 +22,7 @@ export interface PublishExecutionInput {
     status?: 'QUEUED' | 'OPEN' | 'PAUSED';
     startingBidCents?: string;
     incrementCents?: string;
+    secondaryIncrementCents?: string | null;
     reservePriceCents?: string | null;
     fixedPriceCents?: string | null;
     quantity?: number;
@@ -65,10 +66,21 @@ export class ExecutionPublishService {
           where: { auctionId_externalLotId: { auctionId: auction.id, externalLotId: inputLot.externalLotId } },
           create: {
             auctionId: auction.id, externalLotId: inputLot.externalLotId, lotNumber: inputLot.lotNumber, title: inputLot.title, status: desiredStatus,
-            startingBidCents: BigInt(inputLot.startingBidCents ?? '0'), incrementCents: BigInt(inputLot.incrementCents ?? '1'), reservePriceCents: inputLot.reservePriceCents ? BigInt(inputLot.reservePriceCents) : null, fixedPriceCents: inputLot.fixedPriceCents ? BigInt(inputLot.fixedPriceCents) : null,
+            startingBidCents: BigInt(inputLot.startingBidCents ?? '0'), incrementCents: BigInt(inputLot.incrementCents ?? '1'), secondaryIncrementCents: inputLot.secondaryIncrementCents == null ? null : BigInt(inputLot.secondaryIncrementCents), reservePriceCents: inputLot.reservePriceCents ? BigInt(inputLot.reservePriceCents) : null, fixedPriceCents: inputLot.fixedPriceCents ? BigInt(inputLot.fixedPriceCents) : null,
             quantity: inputLot.quantity ?? 1, availableQuantity: inputLot.quantity ?? 1, startsAt: inputLot.startsAt ? new Date(inputLot.startsAt) : null, endsAt: inputLot.endsAt ? new Date(inputLot.endsAt) : null,
           },
-          update: { title: inputLot.title, lotNumber: inputLot.lotNumber },
+          update: {
+            title: inputLot.title,
+            lotNumber: inputLot.lotNumber,
+            ...(inputLot.secondaryIncrementCents !== undefined
+              ? {
+                  secondaryIncrementCents:
+                    inputLot.secondaryIncrementCents === null
+                      ? null
+                      : BigInt(inputLot.secondaryIncrementCents),
+                }
+              : {}),
+          },
         });
         if (auction.status === 'SCHEDULED' && ['QUEUED', 'OPEN', 'PAUSED'].includes(lot.status) && lot.status !== desiredStatus) {
           lot = await client.auctionLotExecution.update({ where: { id: lot.id }, data: { status: desiredStatus, version: { increment: 1 } } });

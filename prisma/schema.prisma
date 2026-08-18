@@ -121,6 +121,7 @@ model AuctionLotExecution {
   status                LotStatus     @default(DRAFT)
   startingBidCents      BigInt        @default(0) @map("starting_bid_cents")
   incrementCents        BigInt        @default(1) @map("increment_cents")
+  secondaryIncrementCents BigInt?     @map("secondary_increment_cents")
   reservePriceCents     BigInt?       @map("reserve_price_cents")
   fixedPriceCents       BigInt?       @map("fixed_price_cents")
   quantity              Int           @default(1)

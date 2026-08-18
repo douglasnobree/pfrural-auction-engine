@@ -27,6 +27,7 @@ describe('public auction query', () => {
         status: 'OPEN',
         startingBidCents: 100n,
         incrementCents: 10n,
+        secondaryIncrementCents: 25n,
         fixedPriceCents: null,
         quantity: 1,
         availableQuantity: 1,
@@ -54,5 +55,6 @@ describe('public auction query', () => {
     expect(lot.currentBidderAlias).toMatch(/^Participante [A-F0-9]{6}$/);
     expect(lot.currentBidderAlias).not.toContain('Nome real');
     expect(lot.currentBidderName).toBeNull();
+    expect(lot.secondaryIncrementCents).toBe('25');
   });
 });
