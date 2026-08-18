@@ -8,6 +8,7 @@ import { participantAlias } from '../../domain/identity.js';
 import { evaluateProxyBid } from '../../domain/proxy-bid.js';
 import { parseCents } from '../../domain/money.js';
 import { assertBiddingWindow, isPreBidWindow } from '../../domain/bidding-window.js';
+import { requiresManagerApproval } from '../../domain/bid-approval.js';
 import type { BidOrigin, BidPhase, ProxyEntry } from '../../domain/types.js';
 
 export interface PlaceBidInput {
@@ -124,7 +125,7 @@ export class BiddingService {
 
       try {
         await this.validateBid(client, lot, input, origin, amountCents);
-        if ((origin === 'ONLINE' || origin === 'PROXY') && lot.auction.mode === 'LIVE' && lot.auction.approvalMode === 'MANUAL_FIFO') {
+        if (requiresManagerApproval({ origin, phase, mode: lot.auction.mode, approvalMode: lot.auction.approvalMode })) {
           const pending = this.pendingResult(request.row.id, lot, phase, request.row.receivedAt.toISOString());
           await client.bidRequest.update({ where: { id: request.row.id }, data: { status: 'PENDING_APPROVAL', result: pending as unknown as Prisma.InputJsonValue } });
           await appendDomainEvent(client, {

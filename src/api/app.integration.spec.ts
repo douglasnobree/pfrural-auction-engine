@@ -5,6 +5,100 @@ import { createApp } from './app.js';
 const runIntegration = process.env.RUN_INTEGRATION_TESTS === 'true';
 
 describe.skipIf(!runIntegration)('auction engine API integration', () => {
+  it('queues every online pre-bid for management approval and preserves FIFO decisions', async () => {
+    const { app, context } = await createApp();
+    try {
+      const integrationKey = `integration-prebid-${Date.now().toString(36)}`;
+      const sandbox = await context.sandbox.create({ participantId: 'prebid-user-one', lotCount: 1, idempotencyKey: integrationKey }, integrationKey);
+      const auctionId = String((sandbox as { auctionId: string }).auctionId);
+      const auction = await context.database.prisma.auctionExecution.findUniqueOrThrow({ where: { id: auctionId }, include: { lots: true } });
+      const lot = auction.lots[0];
+      if (!lot) throw new Error('Pre-bid integration lot is missing');
+
+      const now = Date.now();
+      await context.database.prisma.auctionExecution.update({
+        where: { id: auction.id },
+        data: {
+          mode: 'TIMED',
+          status: 'SCHEDULED',
+          approvalMode: 'AUTOMATIC',
+          preBidEnabled: true,
+          preBidStartsAt: new Date(now - 60_000),
+          preBidEndsAt: new Date(now + 60 * 60_000),
+          startsAt: new Date(now + 2 * 60 * 60_000),
+        },
+      });
+      await context.database.prisma.auctionLotExecution.update({
+        where: { id: lot.id },
+        data: { status: 'OPEN', startsAt: new Date(now + 2 * 60 * 60_000), endsAt: new Date(now + 3 * 60 * 60_000) },
+      });
+      await context.database.prisma.auctionRegistration.create({
+        data: { auctionId: auction.id, userId: 'prebid-user-two', status: 'APPROVED', termsVersion: 'sandbox-v1' },
+      });
+
+      const firstBid = await app.inject({
+        method: 'POST',
+        url: `/v1/lots/${lot.id}/bids`,
+        headers: { 'x-user-id': 'prebid-user-one', 'idempotency-key': `${integrationKey}-bid-one` },
+        payload: { amountCents: '15000' },
+      });
+      const secondBid = await app.inject({
+        method: 'POST',
+        url: `/v1/lots/${lot.id}/bids`,
+        headers: { 'x-user-id': 'prebid-user-two', 'idempotency-key': `${integrationKey}-bid-two` },
+        payload: { amountCents: '16000' },
+      });
+      expect(firstBid.statusCode).toBe(200);
+      expect(firstBid.json()).toMatchObject({ status: 'PENDING_APPROVAL', phase: 'PRE_BID', currentPriceCents: null });
+      expect(secondBid.statusCode).toBe(200);
+      expect(secondBid.json()).toMatchObject({ status: 'PENDING_APPROVAL', phase: 'PRE_BID', currentPriceCents: null });
+
+      const managerHeaders = {
+        'x-user-id': 'prebid-manager',
+        'x-actor-role': 'manager',
+        'x-internal-token': process.env.INTERNAL_SERVICE_TOKEN ?? 'local-development-token',
+      };
+      const pending = await app.inject({ method: 'GET', url: `/v1/manager/auctions/${auction.id}/pending-bids`, headers: managerHeaders });
+      expect(pending.statusCode).toBe(200);
+      expect(pending.json().items.map((item: { bidRequestId: string }) => item.bidRequestId)).toEqual([firstBid.json().bidRequestId, secondBid.json().bidRequestId]);
+
+      const outOfOrderApproval = await app.inject({
+        method: 'POST',
+        url: `/v1/manager/bids/${secondBid.json().bidRequestId}/approve`,
+        headers: { ...managerHeaders, 'idempotency-key': `${integrationKey}-approve-two` },
+      });
+      expect(outOfOrderApproval.statusCode).toBe(409);
+      expect(outOfOrderApproval.json().error.code).toBe('APPROVAL_NOT_FIFO');
+
+      const rejected = await app.inject({
+        method: 'POST',
+        url: `/v1/manager/bids/${firstBid.json().bidRequestId}/reject`,
+        headers: { ...managerHeaders, 'idempotency-key': `${integrationKey}-reject-one` },
+        payload: { reason: 'Valor recusado no teste' },
+      });
+      expect(rejected.statusCode).toBe(200);
+      expect(rejected.json()).toMatchObject({ status: 'REJECTED', phase: 'PRE_BID', errorCode: 'MANAGER_REJECTED' });
+
+      const approved = await app.inject({
+        method: 'POST',
+        url: `/v1/manager/bids/${secondBid.json().bidRequestId}/approve`,
+        headers: { ...managerHeaders, 'idempotency-key': `${integrationKey}-approve-two-after-reject` },
+      });
+      expect(approved.statusCode).toBe(200);
+      expect(approved.json()).toMatchObject({ status: 'ACCEPTED', phase: 'PRE_BID', currentPriceCents: '16000' });
+
+      const history = await app.inject({ method: 'GET', url: `/v1/lots/${lot.id}/bids?limit=10` });
+      expect(history.statusCode).toBe(200);
+      expect(history.json().items).toEqual([expect.objectContaining({ bidRequestId: secondBid.json().bidRequestId, phase: 'PRE_BID', amountCents: '16000' })]);
+    } finally {
+      context.realtime.close();
+      await app.close();
+      await context.rabbit.close();
+      await context.redis.close();
+      await context.database.close();
+    }
+  });
+
   it('serves an authoritative snapshot and keeps registration/bid commands idempotent', async () => {
     const { app, context } = await createApp();
     try {
