@@ -28,6 +28,7 @@ describe('public auction query', () => {
         startingBidCents: 100n,
         incrementCents: 10n,
         secondaryIncrementCents: 25n,
+        nextIncrementIsSecondary: true,
         fixedPriceCents: null,
         quantity: 1,
         availableQuantity: 1,
@@ -56,5 +57,7 @@ describe('public auction query', () => {
     expect(lot.currentBidderAlias).not.toContain('Nome real');
     expect(lot.currentBidderName).toBeNull();
     expect(lot.secondaryIncrementCents).toBe('25');
+    expect(lot.currentIncrementCents).toBe('25');
+    expect(lot.nextBidCents).toBe('145');
   });
 });

@@ -99,6 +99,67 @@ describe.skipIf(!runIntegration)('auction engine API integration', () => {
     }
   });
 
+  it('alternates the authoritative quick-bid increment globally and accepts higher personalized bids', async () => {
+    const { app, context } = await createApp();
+    try {
+      const integrationKey = `integration-alternating-${Date.now().toString(36)}`;
+      const sandbox = await context.sandbox.create({ participantId: 'alternating-user-one', lotCount: 1, idempotencyKey: integrationKey }, integrationKey);
+      const auctionId = String((sandbox as { auctionId: string }).auctionId);
+      const auction = await context.database.prisma.auctionExecution.findUniqueOrThrow({ where: { id: auctionId }, include: { lots: true } });
+      const lot = auction.lots[0];
+      if (!lot) throw new Error('Alternating-increment integration lot is missing');
+
+      await context.database.prisma.auctionExecution.update({
+        where: { id: auction.id },
+        data: { mode: 'TIMED', status: 'RUNNING', approvalMode: 'AUTOMATIC', preBidEnabled: true },
+      });
+      await context.database.prisma.auctionLotExecution.update({
+        where: { id: lot.id },
+        data: { status: 'OPEN', startingBidCents: 10000n, incrementCents: 2000n, secondaryIncrementCents: 3000n },
+      });
+      for (const userId of ['alternating-user-one', 'alternating-user-two', 'alternating-user-three', 'alternating-user-four']) {
+        await context.database.prisma.auctionRegistration.upsert({
+          where: { auctionId_userId: { auctionId: auction.id, userId } },
+          create: { auctionId: auction.id, userId, status: 'APPROVED', termsVersion: 'sandbox-v1' },
+          update: { status: 'APPROVED' },
+        });
+      }
+
+      const bid = async (userId: string, amountCents: string, expectedVersion?: string) => app.inject({
+        method: 'POST',
+        url: `/v1/lots/${lot.id}/bids`,
+        headers: { 'x-user-id': userId, 'idempotency-key': `${integrationKey}-${userId}-${amountCents}` },
+        payload: { amountCents, ...(expectedVersion ? { expectedVersion } : {}) },
+      });
+
+      const opening = await bid('alternating-user-one', '10000');
+      expect(opening.statusCode).toBe(200);
+      expect(opening.json()).toMatchObject({ currentPriceCents: '10000', currentIncrementCents: '2000', nextBidCents: '12000' });
+
+      const standard = await bid('alternating-user-two', '12000', opening.json().version);
+      expect(standard.statusCode).toBe(200);
+      expect(standard.json()).toMatchObject({ currentPriceCents: '12000', currentIncrementCents: '3000', nextBidCents: '15000' });
+
+      const alternative = await bid('alternating-user-three', '15000', standard.json().version);
+      expect(alternative.statusCode).toBe(200);
+      expect(alternative.json()).toMatchObject({ currentPriceCents: '15000', currentIncrementCents: '2000', nextBidCents: '17000' });
+
+      const personalized = await bid('alternating-user-four', '18500', alternative.json().version);
+      expect(personalized.statusCode).toBe(200);
+      expect(personalized.json()).toMatchObject({ currentPriceCents: '18500', currentIncrementCents: '3000', nextBidCents: '21500' });
+
+      const snapshot = await app.inject({ method: 'GET', url: `/v1/auctions/${auction.id}/snapshot` });
+      expect(snapshot.statusCode).toBe(200);
+      expect(snapshot.json().lots[0]).toMatchObject({ currentPriceCents: '18500', currentIncrementCents: '3000', nextBidCents: '21500' });
+    } finally {
+      context.realtime.close();
+      await app.close();
+      await context.rabbit.close();
+      await context.redis.close();
+      await context.database.close();
+    }
+  });
+
   it('serves an authoritative snapshot and keeps registration/bid commands idempotent', async () => {
     const { app, context } = await createApp();
     try {

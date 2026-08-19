@@ -9,6 +9,7 @@ import { evaluateProxyBid } from '../../domain/proxy-bid.js';
 import { parseCents } from '../../domain/money.js';
 import { assertBiddingWindow, isPreBidWindow } from '../../domain/bidding-window.js';
 import { requiresManagerApproval } from '../../domain/bid-approval.js';
+import { activeIncrementCents, advanceIncrementState, nextBidCents as calculateNextBidCents, openingBidCents } from '../../domain/bid-increment.js';
 import type { BidOrigin, BidPhase, ProxyEntry } from '../../domain/types.js';
 
 export interface PlaceBidInput {
@@ -31,6 +32,7 @@ export interface BidCommandResult {
   lotSequence: string;
   version: string;
   currentPriceCents: string | null;
+  currentIncrementCents: string;
   nextBidCents: string;
   currentBidderAlias: string | null;
   currentBidderName?: string | null;
@@ -78,6 +80,7 @@ export interface BidManagementResult {
   previousAmountCents?: string;
   proxyMaxBidCents?: string;
   currentPriceCents: string | null;
+  currentIncrementCents: string;
   nextBidCents: string;
   currentBidderAlias: string | null;
   lotSequence: string;
@@ -320,13 +323,13 @@ export class BiddingService {
         const result: BidManagementResult = {
           status: 'UPDATED', bidId: bid.id, bidRequestId: bid.bidIntent.bidRequestId, lotId: lot.id,
           amountCents: bid.amountCents.toString(), previousAmountCents: bid.amountCents.toString(), proxyMaxBidCents: amountCents.toString(),
-          currentPriceCents: lot.currentPriceCents?.toString() ?? null, nextBidCents: this.nextBidCents(lot.currentPriceCents, lot.startingBidCents, lot.incrementCents),
+          currentPriceCents: lot.currentPriceCents?.toString() ?? null, currentIncrementCents: this.currentIncrementCents(lot), nextBidCents: this.nextBidCents(lot),
           currentBidderAlias: lot.currentBidderAlias, lotSequence: nextSequence.toString(), version: newVersion.toString(), reason: reason.trim(), serverTime: now.toISOString(),
         };
         await appendDomainEvent(client, {
           eventType: 'bid.updated', routingKey: 'bid.updated', aggregateType: 'auction_lot_execution', aggregateId: lot.id,
           auctionId: lot.auctionId, lotId: lot.id, aggregateVersion: newVersion, lotSequence: nextSequence, correlationId, causationId: bid.bidIntent.bidRequestId, actorId,
-          payload: { bidId: bid.id, bidRequestId: bid.bidIntent.bidRequestId, lotId: lot.id, origin: 'PROXY', proxyMaxBidCents: amountCents.toString(), currentPriceCents: lot.currentPriceCents?.toString() ?? null, reason: reason.trim(), lotSequence: nextSequence.toString(), version: newVersion.toString() },
+          payload: { bidId: bid.id, bidRequestId: bid.bidIntent.bidRequestId, lotId: lot.id, origin: 'PROXY', proxyMaxBidCents: amountCents.toString(), currentPriceCents: lot.currentPriceCents?.toString() ?? null, currentIncrementCents: this.currentIncrementCents(lot), nextBidCents: this.nextBidCents(lot), reason: reason.trim(), lotSequence: nextSequence.toString(), version: newVersion.toString() },
         });
         await this.saveManagerMutation(client, actorId, idempotencyKey, 'update-proxy-bid', bid.id, expectedVersion, result, { reason: reason.trim(), proxyMaxBidCents: amountCents.toString() });
         return result;
@@ -350,19 +353,21 @@ export class BiddingService {
       await client.effectiveBid.update({ where: { id: bid.id }, data: { amountCents } });
       await client.bidIntent.update({ where: { id: bid.bidIntentId }, data: { requestedAmountCents: amountCents } });
       await client.bidRequest.update({ where: { id: bid.bidIntent.bidRequestId }, data: { requestedAmountCents: amountCents } });
+      const nextIncrementIsSecondary = await this.recalculateIncrementState(client, lot);
+      const resultLot = { ...lot, currentPriceCents: isLatest ? amountCents : lot.currentPriceCents, nextIncrementIsSecondary };
       await client.auctionLotExecution.update({ where: { id: lot.id }, data: isLatest
-        ? { currentPriceCents: amountCents, currentBidderId: bid.userId, currentBidderAlias: bidderAlias, lotSequence: nextSequence, version: newVersion }
-        : { lotSequence: nextSequence, version: newVersion } });
+        ? { currentPriceCents: amountCents, currentBidderId: bid.userId, currentBidderAlias: bidderAlias, nextIncrementIsSecondary, lotSequence: nextSequence, version: newVersion }
+        : { nextIncrementIsSecondary, lotSequence: nextSequence, version: newVersion } });
       const result: BidManagementResult = {
         status: 'UPDATED', bidId: bid.id, bidRequestId: bid.bidIntent.bidRequestId, lotId: lot.id,
         amountCents: amountCents.toString(), previousAmountCents: bid.amountCents.toString(), currentPriceCents: isLatest ? amountCents.toString() : lot.currentPriceCents?.toString() ?? null,
-        nextBidCents: this.nextBidCents(isLatest ? amountCents : lot.currentPriceCents, lot.startingBidCents, lot.incrementCents), currentBidderAlias: isLatest ? bidderAlias : lot.currentBidderAlias,
+        currentIncrementCents: this.currentIncrementCents(resultLot), nextBidCents: this.nextBidCents(resultLot), currentBidderAlias: isLatest ? bidderAlias : lot.currentBidderAlias,
         lotSequence: nextSequence.toString(), version: newVersion.toString(), reason: reason.trim(), serverTime: now.toISOString(),
       };
       await appendDomainEvent(client, {
         eventType: 'bid.updated', routingKey: 'bid.updated', aggregateType: 'auction_lot_execution', aggregateId: lot.id,
         auctionId: lot.auctionId, lotId: lot.id, aggregateVersion: newVersion, lotSequence: nextSequence, correlationId, causationId: bid.bidIntent.bidRequestId, actorId,
-        payload: { bidId: bid.id, bidRequestId: bid.bidIntent.bidRequestId, lotId: lot.id, previousAmountCents: bid.amountCents.toString(), amountCents: amountCents.toString(), reason: reason.trim(), isLatest, currentPriceCents: isLatest ? amountCents.toString() : lot.currentPriceCents?.toString() ?? null, currentBidderAlias: isLatest ? participantAlias(lot.auctionId, bid.userId) : lot.currentBidderAlias, lotSequence: nextSequence.toString(), version: newVersion.toString() },
+        payload: { bidId: bid.id, bidRequestId: bid.bidIntent.bidRequestId, lotId: lot.id, previousAmountCents: bid.amountCents.toString(), amountCents: amountCents.toString(), reason: reason.trim(), isLatest, currentPriceCents: isLatest ? amountCents.toString() : lot.currentPriceCents?.toString() ?? null, currentIncrementCents: this.currentIncrementCents(resultLot), nextBidCents: this.nextBidCents(resultLot), currentBidderAlias: isLatest ? participantAlias(lot.auctionId, bid.userId) : lot.currentBidderAlias, lotSequence: nextSequence.toString(), version: newVersion.toString() },
       });
       await this.saveManagerMutation(client, actorId, idempotencyKey, 'update-bid', bid.id, expectedVersion, result, { reason: reason.trim(), previousAmountCents: bid.amountCents.toString(), amountCents: amountCents.toString() });
       return result;
@@ -383,17 +388,19 @@ export class BiddingService {
       const currentBidderAlias = current ? participantAlias(lot.auctionId, current.userId, current.bidIntent.displayName) : null;
       if (proxy && isLatest) await client.proxyBid.update({ where: { id: proxy.id }, data: { active: false } });
       await client.effectiveBid.update({ where: { id: bid.id }, data: { voidedAt: now, voidedBy: actorId, voidReason: reason.trim() } });
-      await client.auctionLotExecution.update({ where: { id: lot.id }, data: { currentPriceCents, currentBidderId: current?.userId ?? null, currentBidderAlias, lotSequence: nextSequence, version: newVersion } });
+      const recalculatedIncrementIsSecondary = await this.recalculateIncrementState(client, lot);
+      const recalculatedResultLot = { ...lot, currentPriceCents, nextIncrementIsSecondary: recalculatedIncrementIsSecondary };
+      await client.auctionLotExecution.update({ where: { id: lot.id }, data: { currentPriceCents, currentBidderId: current?.userId ?? null, currentBidderAlias, nextIncrementIsSecondary: recalculatedIncrementIsSecondary, lotSequence: nextSequence, version: newVersion } });
       const result: BidManagementResult = {
         status: 'VOIDED', bidId: bid.id, bidRequestId: bid.bidIntent.bidRequestId, lotId: lot.id,
         amountCents: bid.amountCents.toString(), currentPriceCents: currentPriceCents?.toString() ?? null,
-        nextBidCents: this.nextBidCents(currentPriceCents, lot.startingBidCents, lot.incrementCents), currentBidderAlias,
+        currentIncrementCents: this.currentIncrementCents(recalculatedResultLot), nextBidCents: this.nextBidCents(recalculatedResultLot), currentBidderAlias,
         lotSequence: nextSequence.toString(), version: newVersion.toString(), reason: reason.trim(), serverTime: now.toISOString(),
       };
       await appendDomainEvent(client, {
         eventType: 'bid.voided', routingKey: 'bid.voided', aggregateType: 'auction_lot_execution', aggregateId: lot.id,
         auctionId: lot.auctionId, lotId: lot.id, aggregateVersion: newVersion, lotSequence: nextSequence, correlationId, causationId: bid.bidIntent.bidRequestId, actorId,
-        payload: { bidId: bid.id, bidRequestId: bid.bidIntent.bidRequestId, lotId: lot.id, origin: bid.origin, voidedAmountCents: bid.amountCents.toString(), isLatest, ...(proxy && isLatest ? { proxyId: proxy.id } : {}), reason: reason.trim(), currentPriceCents: currentPriceCents?.toString() ?? null, currentBidderAlias: current ? participantAlias(lot.auctionId, current.userId) : null, lotSequence: nextSequence.toString(), version: newVersion.toString() },
+        payload: { bidId: bid.id, bidRequestId: bid.bidIntent.bidRequestId, lotId: lot.id, origin: bid.origin, voidedAmountCents: bid.amountCents.toString(), isLatest, ...(proxy && isLatest ? { proxyId: proxy.id } : {}), reason: reason.trim(), currentPriceCents: currentPriceCents?.toString() ?? null, currentIncrementCents: this.currentIncrementCents(recalculatedResultLot), nextBidCents: this.nextBidCents(recalculatedResultLot), currentBidderAlias: current ? participantAlias(lot.auctionId, current.userId) : null, lotSequence: nextSequence.toString(), version: newVersion.toString() },
       });
       await this.saveManagerMutation(client, actorId, idempotencyKey, 'void-bid', bid.id, expectedVersion, result, { reason: reason.trim(), voidedAmountCents: bid.amountCents.toString() });
       return result;
@@ -434,8 +441,40 @@ export class BiddingService {
     }
   }
 
-  private nextBidCents(currentPriceCents: bigint | null, startingBidCents: bigint, incrementCents: bigint): string {
-    return (currentPriceCents === null ? (startingBidCents > 0n ? startingBidCents : incrementCents) : currentPriceCents + incrementCents).toString();
+  private currentIncrementCents(lot: LockedLot): string {
+    return activeIncrementCents({
+      incrementCents: lot.incrementCents,
+      secondaryIncrementCents: lot.secondaryIncrementCents,
+      nextIncrementIsSecondary: lot.nextIncrementIsSecondary,
+    }).toString();
+  }
+
+  private nextBidCents(lot: LockedLot): string {
+    return calculateNextBidCents(lot.currentPriceCents, lot.startingBidCents, {
+      incrementCents: lot.incrementCents,
+      secondaryIncrementCents: lot.secondaryIncrementCents,
+      nextIncrementIsSecondary: lot.nextIncrementIsSecondary,
+    }).toString();
+  }
+
+  private async recalculateIncrementState(client: PrismaTransaction, lot: LockedLot): Promise<boolean> {
+    const bids = await client.effectiveBid.findMany({
+      where: { lotId: lot.id, voidedAt: null },
+      orderBy: { lotSequence: 'asc' },
+      select: { amountCents: true },
+    });
+    let nextIncrementIsSecondary = false;
+    let previousPriceCents: bigint | null = null;
+    const opening = openingBidCents(lot.startingBidCents, lot.incrementCents);
+    for (const bid of bids) {
+      if (previousPriceCents === null) {
+        if (bid.amountCents > opening) nextIncrementIsSecondary = true;
+      } else if (bid.amountCents > previousPriceCents) {
+        nextIncrementIsSecondary = !nextIncrementIsSecondary;
+      }
+      previousPriceCents = bid.amountCents;
+    }
+    return nextIncrementIsSecondary;
   }
 
   async listPendingApprovals(auctionId: string, lotId?: string, limit = 100): Promise<{ items: PendingBidApproval[]; hasMore: boolean }> {
@@ -528,7 +567,12 @@ export class BiddingService {
     if (origin === 'ONLINE' && existingOwnProxy && amountCents <= existingOwnProxy.maxBidCents) {
       throw new DomainError('BID_COVERED_BY_PROXY', 'Your active automatic ceiling already covers this amount', 422, { maxBidCents: existingOwnProxy.maxBidCents.toString() });
     }
-    const evaluation = evaluateProxyBid({ entries, candidate: { userId: input.userId, displayName: input.displayName, maxBidCents: amountCents, origin, acceptedSequence: nextSequence, intentId: intent.id }, currentPriceCents: lot.currentPriceCents, currentBidderId: lot.currentBidderId, startingBidCents: lot.startingBidCents, incrementCents: lot.incrementCents });
+    const incrementCents = activeIncrementCents({
+      incrementCents: lot.incrementCents,
+      secondaryIncrementCents: lot.secondaryIncrementCents,
+      nextIncrementIsSecondary: lot.nextIncrementIsSecondary,
+    });
+    const evaluation = evaluateProxyBid({ entries, candidate: { userId: input.userId, displayName: input.displayName, maxBidCents: amountCents, origin, acceptedSequence: nextSequence, intentId: intent.id }, currentPriceCents: lot.currentPriceCents, currentBidderId: lot.currentBidderId, startingBidCents: lot.startingBidCents, incrementCents });
     if (origin === 'PROXY') {
       await client.proxyBid.updateMany({ where: { lotId: lot.id, userId: input.userId, active: true }, data: { active: false } });
       await client.proxyBid.create({ data: { lotId: lot.id, userId: input.userId, displayName: input.displayName, maxBidCents: amountCents, origin: origin as PrismaBidOrigin, acceptedIntentId: intent.id, acceptedSequence: nextSequence } });
@@ -540,6 +584,20 @@ export class BiddingService {
       : evaluation.effectivePriceCents;
     const priceChanged = lot.currentPriceCents !== effectivePriceCents;
     const leaderChanged = lot.currentBidderId !== evaluation.leader.userId;
+    const nextIncrementIsSecondary = priceChanged
+      ? advanceIncrementState({
+          currentPriceCents: lot.currentPriceCents,
+          startingBidCents: lot.startingBidCents,
+          incrementCents: lot.incrementCents,
+          acceptedPriceCents: effectivePriceCents,
+          nextIncrementIsSecondary: lot.nextIncrementIsSecondary,
+        })
+      : lot.nextIncrementIsSecondary;
+    const nextIncrement = activeIncrementCents({
+      incrementCents: lot.incrementCents,
+      secondaryIncrementCents: lot.secondaryIncrementCents,
+      nextIncrementIsSecondary,
+    });
     let endsAt = lot.endsAt;
     let timerExtended = false;
     if (endsAt && lot.extensionWindowSeconds > 0 && lot.extensionSeconds > 0 && endsAt.getTime() - Date.now() <= lot.extensionWindowSeconds * 1000 && (lot.maxExtensions === null || lot.extensionCount < lot.maxExtensions)) {
@@ -550,6 +608,7 @@ export class BiddingService {
     await client.auctionLotExecution.update({ where: { id: lot.id }, data: {
       currentPriceCents: effectivePriceCents, currentBidderId: evaluation.leader.userId,
       currentBidderAlias: participantAlias(lot.auctionId, evaluation.leader.userId, evaluation.leader.displayName), lotSequence: nextSequence, version: newVersion,
+      nextIncrementIsSecondary,
       endsAt, ...(timerExtended ? { extensionCount: { increment: 1 } } : {}),
     } });
     let effectiveBidId: string | undefined;
@@ -562,7 +621,7 @@ export class BiddingService {
     }
     const result: BidCommandResult = {
       status: 'ACCEPTED', bidRequestId, lotId: lot.id, lotSequence: nextSequence.toString(), version: newVersion.toString(),
-      currentPriceCents: effectivePriceCents.toString(), nextBidCents: (effectivePriceCents + lot.incrementCents).toString(), currentBidderAlias: participantAlias(lot.auctionId, evaluation.leader.userId, evaluation.leader.displayName), currentBidderName: evaluation.leader.displayName ?? null,
+      currentPriceCents: effectivePriceCents.toString(), currentIncrementCents: nextIncrement.toString(), nextBidCents: (effectivePriceCents + nextIncrement).toString(), currentBidderAlias: participantAlias(lot.auctionId, evaluation.leader.userId, evaluation.leader.displayName), currentBidderName: evaluation.leader.displayName ?? null,
       phase, acceptedAt: acceptedAt.toISOString(), endsAt: endsAt?.toISOString() ?? null, serverTime: acceptedAt.toISOString(),
       ...(origin === 'PROXY' ? { proxyMaxBidCents: amountCents.toString() } : {}),
       ...(effectiveBidId ? { effectiveBidId } : {}), ...(timerExtended ? { timerExtended: true } : {}),
@@ -573,17 +632,17 @@ export class BiddingService {
       eventType: 'bid.accepted', routingKey: 'bid.accepted', aggregateType: 'auction_lot_execution', aggregateId: lot.id,
       auctionId: lot.auctionId, lotId: lot.id, aggregateVersion: newVersion, lotSequence: nextSequence,
       correlationId: input.correlationId, causationId: bidRequestId, actorId: approvalActorId ?? input.actorId,
-      payload: { bidRequestId, lotId: lot.id, externalLotId: lot.externalLotId, lotSequence: nextSequence.toString(), version: newVersion.toString(), currentPriceCents: effectivePriceCents.toString(), nextBidCents: (effectivePriceCents + lot.incrementCents).toString(), currentBidderAlias: publicBidderAlias, currentBidderName: null, bidOrigin: evaluation.leader.origin, phase, acceptedAt: acceptedAt.toISOString(), endsAt: endsAt?.toISOString() ?? null, timerExtended, serverTime: result.serverTime },
+      payload: { bidRequestId, lotId: lot.id, externalLotId: lot.externalLotId, lotSequence: nextSequence.toString(), version: newVersion.toString(), currentPriceCents: effectivePriceCents.toString(), currentIncrementCents: nextIncrement.toString(), nextBidCents: (effectivePriceCents + nextIncrement).toString(), currentBidderAlias: publicBidderAlias, currentBidderName: null, bidOrigin: evaluation.leader.origin, phase, acceptedAt: acceptedAt.toISOString(), endsAt: endsAt?.toISOString() ?? null, timerExtended, serverTime: result.serverTime },
     });
     return result;
   }
 
   private pendingResult(requestId: string, lot: LockedLot, phase: BidPhase, receivedAt: string): BidCommandResult {
-    return { status: 'PENDING_APPROVAL', bidRequestId: requestId, lotId: lot.id, phase, receivedAt, lotSequence: lot.lotSequence.toString(), version: lot.version.toString(), currentPriceCents: lot.currentPriceCents?.toString() ?? null, nextBidCents: (lot.currentPriceCents === null ? (lot.startingBidCents > 0n ? lot.startingBidCents : lot.incrementCents) : lot.currentPriceCents + lot.incrementCents).toString(), currentBidderAlias: lot.currentBidderAlias, endsAt: lot.endsAt?.toISOString() ?? null, serverTime: new Date().toISOString() };
+    return { status: 'PENDING_APPROVAL', bidRequestId: requestId, lotId: lot.id, phase, receivedAt, lotSequence: lot.lotSequence.toString(), version: lot.version.toString(), currentPriceCents: lot.currentPriceCents?.toString() ?? null, currentIncrementCents: this.currentIncrementCents(lot), nextBidCents: this.nextBidCents(lot), currentBidderAlias: lot.currentBidderAlias, endsAt: lot.endsAt?.toISOString() ?? null, serverTime: new Date().toISOString() };
   }
 
   private rejectedResult(requestId: string, lot: LockedLot, phase: BidPhase, code: string): BidCommandResult {
-    return { status: 'REJECTED', bidRequestId: requestId, lotId: lot.id, phase, lotSequence: lot.lotSequence.toString(), version: lot.version.toString(), currentPriceCents: lot.currentPriceCents?.toString() ?? null, nextBidCents: (lot.currentPriceCents === null ? (lot.startingBidCents > 0n ? lot.startingBidCents : lot.incrementCents) : lot.currentPriceCents + lot.incrementCents).toString(), currentBidderAlias: lot.currentBidderAlias, endsAt: lot.endsAt?.toISOString() ?? null, serverTime: new Date().toISOString(), errorCode: code };
+    return { status: 'REJECTED', bidRequestId: requestId, lotId: lot.id, phase, lotSequence: lot.lotSequence.toString(), version: lot.version.toString(), currentPriceCents: lot.currentPriceCents?.toString() ?? null, currentIncrementCents: this.currentIncrementCents(lot), nextBidCents: this.nextBidCents(lot), currentBidderAlias: lot.currentBidderAlias, endsAt: lot.endsAt?.toISOString() ?? null, serverTime: new Date().toISOString(), errorCode: code };
   }
 
   private phaseFor(lot: LockedLot): BidPhase {

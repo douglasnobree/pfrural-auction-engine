@@ -3,6 +3,7 @@ import { asBigInt, asDate } from '../../infrastructure/database/rows.js';
 import { DomainError } from '../../domain/errors.js';
 import { centsToJson } from '../../domain/money.js';
 import { participantAlias } from '../../domain/identity.js';
+import { activeIncrementCents, nextBidCents } from '../../domain/bid-increment.js';
 
 function publicBidderAlias(auctionId: string, userId: string | null): string | null {
   return userId ? participantAlias(auctionId, userId) : null;
@@ -49,11 +50,12 @@ export class AuctionQueryService {
       lots: auction.lots.map((lot) => ({
         id: lot.id, externalId: lot.externalLotId, lotNumber: lot.lotNumber, title: lot.title, status: lot.status,
         startingBidCents: asBigInt(lot.startingBidCents).toString(), incrementCents: asBigInt(lot.incrementCents).toString(), secondaryIncrementCents: lot.secondaryIncrementCents == null ? null : asBigInt(lot.secondaryIncrementCents).toString(),
+        currentIncrementCents: activeIncrementCents({ incrementCents: asBigInt(lot.incrementCents), secondaryIncrementCents: lot.secondaryIncrementCents == null ? null : asBigInt(lot.secondaryIncrementCents), nextIncrementIsSecondary: lot.nextIncrementIsSecondary }).toString(),
         fixedPriceCents: lot.fixedPriceCents === null ? null : asBigInt(lot.fixedPriceCents).toString(),
         quantity: lot.quantity, availableQuantity: lot.availableQuantity,
         startsAt: asDate(lot.startsAt)?.toISOString() ?? null, endsAt: asDate(lot.endsAt)?.toISOString() ?? null,
         currentPriceCents: centsToJson(lot.currentPriceCents === null ? null : asBigInt(lot.currentPriceCents)),
-        nextBidCents: (lot.currentPriceCents === null ? (lot.startingBidCents > 0n ? lot.startingBidCents : lot.incrementCents) : lot.currentPriceCents + lot.incrementCents).toString(),
+        nextBidCents: nextBidCents(lot.currentPriceCents === null ? null : asBigInt(lot.currentPriceCents), asBigInt(lot.startingBidCents), { incrementCents: asBigInt(lot.incrementCents), secondaryIncrementCents: lot.secondaryIncrementCents == null ? null : asBigInt(lot.secondaryIncrementCents), nextIncrementIsSecondary: lot.nextIncrementIsSecondary }).toString(),
         currentBidderAlias: publicBidderAlias(auction.id, lot.currentBidderId),
         currentBidderName: null,
         winnerName: lot.winnerAward ? publicBidderAlias(auction.id, lot.currentBidderId) : null,
