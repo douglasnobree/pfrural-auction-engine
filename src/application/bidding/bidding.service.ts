@@ -23,6 +23,7 @@ export interface PlaceBidInput {
   origin?: BidOrigin;
   actorId?: string;
   displayName?: string;
+  autoApproveRegistration?: boolean;
 }
 
 export interface BidCommandResult {
@@ -127,7 +128,17 @@ export class BiddingService {
       }
 
       try {
-        await this.validateBid(client, lot, input, origin, amountCents);
+        await this.validateBid(
+          client,
+          lot,
+          input,
+          origin,
+          amountCents,
+          input.autoApproveRegistration === true,
+        );
+        if (input.autoApproveRegistration) {
+          await this.ensureManagerRegistration(client, lot, input);
+        }
         if (requiresManagerApproval({ origin, phase, mode: lot.auction.mode, approvalMode: lot.auction.approvalMode })) {
           const pending = this.pendingResult(request.row.id, lot, phase, request.row.receivedAt.toISOString());
           await client.bidRequest.update({ where: { id: request.row.id }, data: { status: 'PENDING_APPROVAL', result: pending as unknown as Prisma.InputJsonValue } });
@@ -535,7 +546,14 @@ export class BiddingService {
     return lot;
   }
 
-  private async validateBid(client: PrismaTransaction, lot: LockedLot, input: PlaceBidInput, origin: BidOrigin, amountCents: bigint): Promise<void> {
+  private async validateBid(
+    client: PrismaTransaction,
+    lot: LockedLot,
+    input: PlaceBidInput,
+    origin: BidOrigin,
+    amountCents: bigint,
+    allowUnapprovedRegistration = false,
+  ): Promise<void> {
     if (!['SHOPPING', 'TIMED', 'LIVE'].includes(lot.auction.mode)) throw new DomainError('WRONG_AUCTION_MODE', 'This lot does not accept bids', 422);
     const preBidWindow = isPreBidWindow(lot.auction.mode, lot.auction.status, lot.auction.preBidEnabled);
     try {
@@ -549,9 +567,40 @@ export class BiddingService {
     const now = Date.now();
     if (!preBidWindow && lot.startsAt && now < lot.startsAt.getTime()) throw new DomainError('LOT_NOT_STARTED', 'Lot has not started', 409);
     if (lot.endsAt && now >= lot.endsAt.getTime()) throw new DomainError('LOT_ENDED', 'Lot has ended', 409);
-    const registration = await client.auctionRegistration.findUnique({ where: { auctionId_userId: { auctionId: lot.auctionId, userId: input.userId } } });
-    if (registration?.status !== 'APPROVED') throw new DomainError('REGISTRATION_REQUIRED', 'Participant is not approved for this auction', 403);
+    if (!allowUnapprovedRegistration) {
+      const registration = await client.auctionRegistration.findUnique({ where: { auctionId_userId: { auctionId: lot.auctionId, userId: input.userId } } });
+      if (registration?.status !== 'APPROVED') throw new DomainError('REGISTRATION_REQUIRED', 'Participant is not approved for this auction', 403);
+    }
     if (amountCents <= 0n) throw new DomainError('INVALID_AMOUNT', 'Bid must be positive', 422);
+  }
+
+  private async ensureManagerRegistration(client: PrismaTransaction, lot: LockedLot, input: PlaceBidInput): Promise<void> {
+    const existing = await client.auctionRegistration.findUnique({ where: { auctionId_userId: { auctionId: lot.auctionId, userId: input.userId } } });
+    if (existing?.status === 'APPROVED') return;
+
+    const registration = existing
+      ? await client.auctionRegistration.update({ where: { id: existing.id }, data: { status: 'APPROVED' } })
+      : await client.auctionRegistration.create({ data: { auctionId: lot.auctionId, userId: input.userId, status: 'APPROVED', termsVersion: lot.auction.regulationVersion } });
+
+    await appendDomainEvent(client, {
+      eventType: 'registration.approved',
+      routingKey: 'registration.approved',
+      aggregateType: 'auction_registration',
+      aggregateId: registration.id,
+      auctionId: lot.auctionId,
+      lotId: lot.id,
+      correlationId: input.correlationId,
+      causationId: input.idempotencyKey,
+      actorId: input.actorId,
+      payload: {
+        registrationId: registration.id,
+        auctionId: lot.auctionId,
+        userId: input.userId,
+        termsVersion: registration.termsVersion,
+        source: 'manager-floor-bid',
+      },
+      writeEventLog: false,
+    });
   }
 
   private async acceptRequestLocked(client: PrismaTransaction, lot: LockedLot, bidRequestId: string, amountCents: bigint, origin: BidOrigin, phase: BidPhase, input: PlaceBidInput, approvalActorId: string | undefined): Promise<BidCommandResult> {

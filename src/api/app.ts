@@ -131,7 +131,7 @@ export async function createApp(context = createContext()): Promise<{ app: Fasti
   });
   app.post('/v1/manager/lots/:lotId/floor-bids', async (request) => {
     const actor = managerFromRequest(request); const { lotId } = lotParam.parse(request.params); const body = parseBody(floorBidBody, request.body);
-    return context.bidding.placeBid({ lotId, userId: body.participantId, amountCents: body.amountCents, expectedVersion: body.expectedVersion ? BigInt(body.expectedVersion) : undefined, origin: body.origin, displayName: trustedDisplayName(request, body.displayName), actorId: actor.userId, idempotencyKey: idempotencyKey(request), correlationId: correlationId(request) });
+    return context.bidding.placeBid({ lotId, userId: body.participantId, amountCents: body.amountCents, expectedVersion: body.expectedVersion ? BigInt(body.expectedVersion) : undefined, origin: body.origin, displayName: trustedDisplayName(request, body.displayName), actorId: actor.userId, autoApproveRegistration: true, idempotencyKey: idempotencyKey(request), correlationId: correlationId(request) });
   });
   app.get('/v1/manager/auctions/:auctionId/pending-bids', async (request) => {
     managerFromRequest(request); const { auctionId } = auctionParam.parse(request.params); const query = pendingBidsQuery.parse(request.query);

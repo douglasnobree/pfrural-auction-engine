@@ -241,10 +241,15 @@ describe.skipIf(!runIntegration)('auction engine API integration', () => {
         method: 'POST',
         url: `/v1/manager/lots/${lot.id}/floor-bids`,
         headers: { ...managerHeaders, 'idempotency-key': `integration-floor-${managementKey}` },
-        payload: { participantId: 'user-demo', amountCents: '1100000', origin: 'FLOOR', displayName: 'Participante de teste' },
+        payload: { participantId: 'manager-unapproved', amountCents: '1100000', origin: 'FLOOR', displayName: 'Participante de teste' },
       });
       expect(floorBid.statusCode).toBe(200);
       expect(floorBid.json().currentPriceCents).toBe('1000999');
+      await expect(
+        context.database.prisma.auctionRegistration.findUnique({
+          where: { auctionId_userId: { auctionId: auction.id, userId: 'manager-unapproved' } },
+        }),
+      ).resolves.toMatchObject({ status: 'APPROVED', termsVersion: expect.any(String) });
 
       const managerHistory = await app.inject({ method: 'GET', url: `/v1/manager/lots/${lot.id}/bids?limit=10`, headers: managerHeaders });
       expect(managerHistory.statusCode).toBe(200);
