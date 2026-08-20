@@ -2,12 +2,12 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Database } from '../../infrastructure/database/db.js';
 import { RegistrationService } from './registration.service.js';
 
-function serviceWithClient(client: Record<string, unknown>) {
+function serviceWithClient(client: Record<string, unknown>, bidding?: { activatePendingBids: ReturnType<typeof vi.fn> }) {
   const database = {
     prisma: client,
     transaction: async (work: (transactionClient: Record<string, unknown>) => unknown) => work(client),
   } as unknown as Database;
-  return new RegistrationService(database);
+  return new RegistrationService(database, bidding as never);
 }
 
 describe('RegistrationService', () => {
@@ -70,6 +70,29 @@ describe('RegistrationService', () => {
     expect(result).toMatchObject({ registrationId: 'registration-id', status: 'APPROVED', enabled: true });
     expect(client.managerAction.create).toHaveBeenCalledWith({ data: expect.objectContaining({ action: 'enable-registration', idempotencyKey: 'approval-key' }) });
     expect(client.outboxEvent.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ eventType: 'registration.approved' }) }));
+  });
+
+  it('releases deferred bids after enabling the participant', async () => {
+    const acceptedAt = new Date('2026-08-05T12:00:00.000Z');
+    const client = {
+      managerAction: {
+        findUnique: vi.fn().mockResolvedValue(null),
+        create: vi.fn().mockResolvedValue({}),
+      },
+      auctionRegistration: {
+        findFirst: vi.fn().mockResolvedValue({ id: 'registration-id', auctionId: 'auction-id', userId: 'user-id', status: 'PENDING', termsVersion: 'terms-v1', acceptedAt }),
+        update: vi.fn().mockResolvedValue({ id: 'registration-id', auctionId: 'auction-id', userId: 'user-id', status: 'APPROVED', termsVersion: 'terms-v1', acceptedAt }),
+      },
+      outboxEvent: { create: vi.fn().mockResolvedValue({}) },
+      $queryRaw: vi.fn().mockResolvedValue([]),
+    };
+    const bidding = { activatePendingBids: vi.fn().mockResolvedValue({ processed: 2, accepted: 2, rejected: 0 }) };
+    const service = serviceWithClient(client, bidding);
+
+    const result = await service.setEnabled('auction-id', 'registration-id', true, 'manager-id', 'approval-key', 'correlation-id');
+
+    expect(bidding.activatePendingBids).toHaveBeenCalledWith('auction-id', 'user-id', 'manager-id', 'correlation-id');
+    expect(result).toMatchObject({ releasedBids: { processed: 2, accepted: 2, rejected: 0 } });
   });
 
   it('returns manager registrations with a stable cursor over acceptedAt and id', async () => {

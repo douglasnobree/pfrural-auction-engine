@@ -14,9 +14,10 @@ export interface RegistrationPage {
   hasMore: boolean;
 }
 import { Prisma } from '@prisma/client';
+import type { BiddingService } from '../bidding/bidding.service.js';
 
 export class RegistrationService {
-  constructor(private readonly database: Database) {}
+  constructor(private readonly database: Database, private readonly bidding?: BiddingService) {}
 
   async register(auctionId: string, userId: string, termsVersion: string, idempotencyKey: string, correlationId: string, globallyEnabled = false): Promise<Record<string, unknown>> {
     if (!termsVersion.trim()) throw new DomainError('TERMS_VERSION_REQUIRED', 'termsVersion is required', 400);
@@ -92,7 +93,7 @@ export class RegistrationService {
   }
 
   async setEnabled(auctionId: string, registrationId: string, enabled: boolean, actorId: string, idempotencyKey: string, correlationId: string): Promise<Record<string, unknown>> {
-    return this.database.transaction(async (client) => {
+    const result = await this.database.transaction(async (client) => {
       const saved = await client.managerAction.findUnique({ where: { actorId_idempotencyKey: { actorId, idempotencyKey } } });
       if (saved?.result) return saved.result as Record<string, unknown>;
       await client.$queryRaw`SELECT id FROM auction_registration WHERE id = ${registrationId}::uuid FOR UPDATE`;
@@ -127,5 +128,10 @@ export class RegistrationService {
       });
       return result;
     });
+    if (enabled && this.bidding) {
+      const releasedBids = await this.bidding.activatePendingBids(auctionId, String(result.userId), actorId, correlationId);
+      return { ...result, releasedBids };
+    }
+    return result;
   }
 }

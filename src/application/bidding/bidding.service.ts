@@ -27,7 +27,7 @@ export interface PlaceBidInput {
 }
 
 export interface BidCommandResult {
-  status: 'ACCEPTED' | 'PENDING_APPROVAL' | 'REJECTED';
+  status: 'ACCEPTED' | 'PENDING_ELIGIBILITY' | 'PENDING_APPROVAL' | 'REJECTED';
   bidRequestId: string;
   lotId: string;
   lotSequence: string;
@@ -134,10 +134,22 @@ export class BiddingService {
           input,
           origin,
           amountCents,
-          input.autoApproveRegistration === true,
+          true,
         );
         if (input.autoApproveRegistration) {
           await this.ensureManagerRegistration(client, lot, input);
+        }
+        const registration = await client.auctionRegistration.findUnique({ where: { auctionId_userId: { auctionId: lot.auctionId, userId: input.userId } } });
+        if (!input.autoApproveRegistration && !registration) {
+          throw new DomainError('REGISTRATION_REQUIRED', 'Participant registration is required before bidding', 403);
+        }
+        if (!input.autoApproveRegistration && registration?.status === 'PENDING') {
+          const pending = this.pendingEligibilityResult(request.row.id, lot, phase, request.row.receivedAt.toISOString());
+          await client.bidRequest.update({ where: { id: request.row.id }, data: { status: 'PENDING_ELIGIBILITY', result: pending as unknown as Prisma.InputJsonValue } });
+          return pending;
+        }
+        if (!input.autoApproveRegistration && registration?.status !== 'APPROVED') {
+          throw new DomainError('REGISTRATION_REQUIRED', 'Participant is not approved for this auction', 403);
         }
         if (BID_APPROVAL_FEATURE_ENABLED && requiresManagerApproval({ origin, phase, mode: lot.auction.mode, approvalMode: lot.auction.approvalMode })) {
           const pending = this.pendingResult(request.row.id, lot, phase, request.row.receivedAt.toISOString());
@@ -446,6 +458,55 @@ export class BiddingService {
     return result;
   }
 
+  async activatePendingBids(auctionId: string, userId: string, actorId: string, correlationId: string): Promise<{ processed: number; accepted: number; rejected: number }> {
+    const pendingRequests = await this.database.prisma.bidRequest.findMany({
+      where: { userId, status: 'PENDING_ELIGIBILITY', lot: { auctionId } },
+      orderBy: [{ receivedAt: 'asc' }, { id: 'asc' }],
+      select: { id: true },
+    });
+    let accepted = 0;
+    let rejected = 0;
+    for (const pending of pendingRequests) {
+      const result = await this.activatePendingBid(pending.id, userId, actorId, correlationId);
+      if (result === 'ACCEPTED') accepted += 1;
+      if (result === 'REJECTED') rejected += 1;
+    }
+    return { processed: accepted + rejected, accepted, rejected };
+  }
+
+  private async activatePendingBid(bidRequestId: string, userId: string, actorId: string, correlationId: string): Promise<'ACCEPTED' | 'REJECTED' | 'SKIPPED'> {
+    return this.database.transaction(async (client) => {
+      await client.$queryRaw`SELECT id FROM bid_request WHERE id = ${bidRequestId}::uuid FOR UPDATE`;
+      const request = await client.bidRequest.findUnique({ where: { id: bidRequestId } });
+      if (!request || request.status !== 'PENDING_ELIGIBILITY' || request.userId !== userId) return 'SKIPPED';
+      const lot = await this.lockLot(client, request.lotId);
+      const phase = storedBidPhase(request.phase as BidPhase | null);
+      const input: PlaceBidInput = {
+        lotId: lot.id,
+        userId,
+        amountCents: request.requestedAmountCents.toString(),
+        idempotencyKey: request.idempotencyKey,
+        correlationId,
+        displayName: request.displayName ?? undefined,
+      };
+      try {
+        await this.validateBid(client, lot, input, request.origin, request.requestedAmountCents);
+        await this.acceptRequestLocked(client, lot, request.id, request.requestedAmountCents, request.origin, phase, input, undefined);
+        return 'ACCEPTED';
+      } catch (error) {
+        if (!isDomainError(error)) throw error;
+        const rejected = this.rejectedResult(request.id, lot, phase, error.code);
+        await client.bidRequest.update({ where: { id: request.id }, data: { status: 'REJECTED', errorCode: error.code, result: rejected as unknown as Prisma.InputJsonValue, completedAt: new Date() } });
+        await appendDomainEvent(client, {
+          eventType: 'bid.rejected', routingKey: 'bid.rejected', aggregateType: 'bid_request', aggregateId: request.id,
+          auctionId: lot.auctionId, lotId: lot.id, correlationId, actorId,
+          payload: { bidRequestId: request.id, lotId: lot.id, externalLotId: lot.externalLotId, code: error.code }, writeEventLog: false,
+        });
+        return 'REJECTED';
+      }
+    });
+  }
+
   private async saveManagerMutation(client: PrismaTransaction, actorId: string, idempotencyKey: string, action: string, bidId: string, expectedVersion: bigint | undefined, result: BidManagementResult, payload: Record<string, unknown>): Promise<void> {
     try {
       await client.managerAction.create({ data: { actorId, action, targetType: 'effective_bid', targetId: bidId, idempotencyKey, expectedVersion, payload: payload as Prisma.InputJsonValue, result: result as unknown as Prisma.InputJsonValue } });
@@ -691,6 +752,10 @@ export class BiddingService {
 
   private pendingResult(requestId: string, lot: LockedLot, phase: BidPhase, receivedAt: string): BidCommandResult {
     return { status: 'PENDING_APPROVAL', bidRequestId: requestId, lotId: lot.id, phase, receivedAt, lotSequence: lot.lotSequence.toString(), version: lot.version.toString(), currentPriceCents: lot.currentPriceCents?.toString() ?? null, currentIncrementCents: this.currentIncrementCents(lot), nextBidCents: this.nextBidCents(lot), currentBidderAlias: lot.currentBidderAlias, endsAt: lot.endsAt?.toISOString() ?? null, serverTime: new Date().toISOString() };
+  }
+
+  private pendingEligibilityResult(requestId: string, lot: LockedLot, phase: BidPhase, receivedAt: string): BidCommandResult {
+    return { status: 'PENDING_ELIGIBILITY', bidRequestId: requestId, lotId: lot.id, phase, receivedAt, lotSequence: lot.lotSequence.toString(), version: lot.version.toString(), currentPriceCents: lot.currentPriceCents?.toString() ?? null, currentIncrementCents: this.currentIncrementCents(lot), nextBidCents: this.nextBidCents(lot), currentBidderAlias: lot.currentBidderAlias, endsAt: lot.endsAt?.toISOString() ?? null, serverTime: new Date().toISOString() };
   }
 
   private rejectedResult(requestId: string, lot: LockedLot, phase: BidPhase, code: string): BidCommandResult {

@@ -43,7 +43,7 @@ export function createContext(): AppContext {
   const tickets = new RealtimeTicketService(database);
   const hub = new EventHub();
   const redis = new RedisService();
-  return { database, rabbit, queries, bidding, manager: new ManagerService(database, bidding), registrations: new RegistrationService(database), tickets, shopping: new ShoppingService(database), executions: new ExecutionPublishService(database), sandbox: new SandboxService(database), hub, redis, realtime: new RealtimeGateway(tickets, queries, hub) };
+  return { database, rabbit, queries, bidding, manager: new ManagerService(database, bidding), registrations: new RegistrationService(database, bidding), tickets, shopping: new ShoppingService(database), executions: new ExecutionPublishService(database), sandbox: new SandboxService(database), hub, redis, realtime: new RealtimeGateway(tickets, queries, hub) };
 }
 
 export async function createApp(context = createContext()): Promise<{ app: FastifyInstance; context: AppContext }> {

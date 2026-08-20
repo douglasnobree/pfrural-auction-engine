@@ -155,6 +155,64 @@ describe.skipIf(!runIntegration)('auction engine API integration', () => {
     }
   });
 
+  it('keeps bids from pending participants out of the official state until approval', async () => {
+    const { app, context } = await createApp();
+    try {
+      const integrationKey = `integration-deferred-${Date.now().toString(36)}`;
+      const sandbox = await context.sandbox.create({ participantId: 'deferred-owner', lotCount: 1, idempotencyKey: integrationKey }, integrationKey);
+      const auctionId = String((sandbox as { auctionId: string }).auctionId);
+      const auction = await context.database.prisma.auctionExecution.findUniqueOrThrow({ where: { id: auctionId }, include: { lots: true } });
+      const lot = auction.lots[0];
+      if (!lot) throw new Error('Deferred-bid integration lot is missing');
+
+      const registration = await app.inject({
+        method: 'POST',
+        url: `/v1/auctions/${auction.id}/registrations`,
+        headers: { 'x-user-id': 'deferred-user', 'idempotency-key': `${integrationKey}-registration` },
+        payload: { termsVersion: 'sandbox-v1' },
+      });
+      expect(registration.statusCode).toBe(200);
+      expect(registration.json().status).toBe('PENDING');
+
+      const deferredBid = await app.inject({
+        method: 'POST',
+        url: `/v1/lots/${lot.id}/bids`,
+        headers: { 'x-user-id': 'deferred-user', 'idempotency-key': `${integrationKey}-bid` },
+        payload: { amountCents: '15000' },
+      });
+      expect(deferredBid.statusCode).toBe(200);
+      expect(deferredBid.json()).toMatchObject({ status: 'PENDING_ELIGIBILITY', currentPriceCents: null, lotSequence: '0' });
+
+      const historyBeforeApproval = await app.inject({ method: 'GET', url: `/v1/lots/${lot.id}/bids?limit=10` });
+      expect(historyBeforeApproval.statusCode).toBe(200);
+      expect(historyBeforeApproval.json()).toMatchObject({ items: [], hasMore: false });
+      const snapshotBeforeApproval = await app.inject({ method: 'GET', url: `/v1/auctions/${auction.id}/snapshot` });
+      expect(snapshotBeforeApproval.json().lots[0]).toMatchObject({ currentPriceCents: null, lotSequence: '0', version: '0' });
+
+      const savedRegistration = await context.database.prisma.auctionRegistration.findUniqueOrThrow({ where: { auctionId_userId: { auctionId: auction.id, userId: 'deferred-user' } } });
+      const managerHeaders = { 'x-user-id': 'deferred-manager', 'x-actor-role': 'manager', 'x-internal-token': process.env.INTERNAL_SERVICE_TOKEN ?? 'local-development-token' };
+      const enabled = await app.inject({
+        method: 'PUT',
+        url: `/v1/manager/auctions/${auction.id}/registrations/${savedRegistration.id}`,
+        headers: { ...managerHeaders, 'idempotency-key': `${integrationKey}-enable` },
+        payload: { enabled: true },
+      });
+      expect(enabled.statusCode).toBe(200);
+      expect(enabled.json()).toMatchObject({ status: 'APPROVED', releasedBids: { processed: 1, accepted: 1, rejected: 0 } });
+
+      const historyAfterApproval = await app.inject({ method: 'GET', url: `/v1/lots/${lot.id}/bids?limit=10` });
+      expect(historyAfterApproval.json().items).toEqual(expect.arrayContaining([expect.objectContaining({ bidRequestId: deferredBid.json().bidRequestId, amountCents: '15000', phase: 'LIVE_BID' })]));
+      const snapshotAfterApproval = await app.inject({ method: 'GET', url: `/v1/auctions/${auction.id}/snapshot` });
+      expect(snapshotAfterApproval.json().lots[0]).toMatchObject({ currentPriceCents: '15000', lotSequence: '1', version: '1' });
+    } finally {
+      context.realtime.close();
+      await app.close();
+      await context.rabbit.close();
+      await context.redis.close();
+      await context.database.close();
+    }
+  });
+
   it('serves an authoritative snapshot and keeps registration/bid commands idempotent', async () => {
     const { app, context } = await createApp();
     try {
