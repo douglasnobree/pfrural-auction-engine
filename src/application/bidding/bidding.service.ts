@@ -8,7 +8,7 @@ import { participantAlias } from '../../domain/identity.js';
 import { evaluateProxyBid } from '../../domain/proxy-bid.js';
 import { parseCents } from '../../domain/money.js';
 import { assertBiddingWindow, isPreBidWindow } from '../../domain/bidding-window.js';
-import { requiresManagerApproval } from '../../domain/bid-approval.js';
+import { BID_APPROVAL_FEATURE_ENABLED, requiresManagerApproval } from '../../domain/bid-approval.js';
 import { activeIncrementCents, advanceIncrementState, nextBidCents as calculateNextBidCents, openingBidCents } from '../../domain/bid-increment.js';
 import type { BidOrigin, BidPhase, ProxyEntry } from '../../domain/types.js';
 
@@ -139,7 +139,7 @@ export class BiddingService {
         if (input.autoApproveRegistration) {
           await this.ensureManagerRegistration(client, lot, input);
         }
-        if (requiresManagerApproval({ origin, phase, mode: lot.auction.mode, approvalMode: lot.auction.approvalMode })) {
+        if (BID_APPROVAL_FEATURE_ENABLED && requiresManagerApproval({ origin, phase, mode: lot.auction.mode, approvalMode: lot.auction.approvalMode })) {
           const pending = this.pendingResult(request.row.id, lot, phase, request.row.receivedAt.toISOString());
           await client.bidRequest.update({ where: { id: request.row.id }, data: { status: 'PENDING_APPROVAL', result: pending as unknown as Prisma.InputJsonValue } });
           await appendDomainEvent(client, {
@@ -167,6 +167,7 @@ export class BiddingService {
   }
 
   async approveBidRequest(bidRequestId: string, actorId: string, idempotencyKey: string, correlationId: string): Promise<BidCommandResult> {
+    if (!BID_APPROVAL_FEATURE_ENABLED) throw new DomainError('BID_APPROVAL_LEGACY', 'Bid approval is a legacy feature and is disabled', 410);
     return this.database.transaction(async (client) => {
       const saved = await client.managerAction.findUnique({ where: { actorId_idempotencyKey: { actorId, idempotencyKey } } });
       if (saved) {
@@ -196,6 +197,7 @@ export class BiddingService {
   }
 
   async rejectBidRequest(bidRequestId: string, actorId: string, reason: string, idempotencyKey: string, correlationId: string): Promise<BidCommandResult> {
+    if (!BID_APPROVAL_FEATURE_ENABLED) throw new DomainError('BID_APPROVAL_LEGACY', 'Bid approval is a legacy feature and is disabled', 410);
     if (reason.trim().length < 3) throw new DomainError('REJECTION_REASON_REQUIRED', 'A rejection reason is required', 400);
     return this.database.transaction(async (client) => {
       const saved = await client.managerAction.findUnique({ where: { actorId_idempotencyKey: { actorId, idempotencyKey } } });
@@ -489,6 +491,7 @@ export class BiddingService {
   }
 
   async listPendingApprovals(auctionId: string, lotId?: string, limit = 100): Promise<{ items: PendingBidApproval[]; hasMore: boolean }> {
+    if (!BID_APPROVAL_FEATURE_ENABLED) return { items: [], hasMore: false };
     const rows = await this.database.prisma.bidRequest.findMany({
       where: { status: 'PENDING_APPROVAL', lot: { auctionId, ...(lotId ? { id: lotId } : {}) } },
       include: { lot: { select: { externalLotId: true, lotNumber: true, title: true } } },

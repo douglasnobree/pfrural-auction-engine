@@ -5,7 +5,7 @@ import { createApp } from './app.js';
 const runIntegration = process.env.RUN_INTEGRATION_TESTS === 'true';
 
 describe.skipIf(!runIntegration)('auction engine API integration', () => {
-  it('queues every online pre-bid for management approval and preserves FIFO decisions', async () => {
+  it('accepts online pre-bids automatically and keeps legacy approval disabled', async () => {
     const { app, context } = await createApp();
     try {
       const integrationKey = `integration-prebid-${Date.now().toString(36)}`;
@@ -49,9 +49,9 @@ describe.skipIf(!runIntegration)('auction engine API integration', () => {
         payload: { amountCents: '16000' },
       });
       expect(firstBid.statusCode).toBe(200);
-      expect(firstBid.json()).toMatchObject({ status: 'PENDING_APPROVAL', phase: 'PRE_BID', currentPriceCents: null });
+      expect(firstBid.json()).toMatchObject({ status: 'ACCEPTED', phase: 'PRE_BID', currentPriceCents: '15000' });
       expect(secondBid.statusCode).toBe(200);
-      expect(secondBid.json()).toMatchObject({ status: 'PENDING_APPROVAL', phase: 'PRE_BID', currentPriceCents: null });
+      expect(secondBid.json()).toMatchObject({ status: 'ACCEPTED', phase: 'PRE_BID', currentPriceCents: '16000' });
 
       const managerHeaders = {
         'x-user-id': 'prebid-manager',
@@ -60,36 +60,31 @@ describe.skipIf(!runIntegration)('auction engine API integration', () => {
       };
       const pending = await app.inject({ method: 'GET', url: `/v1/manager/auctions/${auction.id}/pending-bids`, headers: managerHeaders });
       expect(pending.statusCode).toBe(200);
-      expect(pending.json().items.map((item: { bidRequestId: string }) => item.bidRequestId)).toEqual([firstBid.json().bidRequestId, secondBid.json().bidRequestId]);
+      expect(pending.json()).toEqual({ items: [], hasMore: false });
 
-      const outOfOrderApproval = await app.inject({
+      const approvalAttempt = await app.inject({
         method: 'POST',
         url: `/v1/manager/bids/${secondBid.json().bidRequestId}/approve`,
         headers: { ...managerHeaders, 'idempotency-key': `${integrationKey}-approve-two` },
       });
-      expect(outOfOrderApproval.statusCode).toBe(409);
-      expect(outOfOrderApproval.json().error.code).toBe('APPROVAL_NOT_FIFO');
+      expect(approvalAttempt.statusCode).toBe(410);
+      expect(approvalAttempt.json().error.code).toBe('BID_APPROVAL_LEGACY');
 
-      const rejected = await app.inject({
+      const rejectionAttempt = await app.inject({
         method: 'POST',
         url: `/v1/manager/bids/${firstBid.json().bidRequestId}/reject`,
         headers: { ...managerHeaders, 'idempotency-key': `${integrationKey}-reject-one` },
         payload: { reason: 'Valor recusado no teste' },
       });
-      expect(rejected.statusCode).toBe(200);
-      expect(rejected.json()).toMatchObject({ status: 'REJECTED', phase: 'PRE_BID', errorCode: 'MANAGER_REJECTED' });
-
-      const approved = await app.inject({
-        method: 'POST',
-        url: `/v1/manager/bids/${secondBid.json().bidRequestId}/approve`,
-        headers: { ...managerHeaders, 'idempotency-key': `${integrationKey}-approve-two-after-reject` },
-      });
-      expect(approved.statusCode).toBe(200);
-      expect(approved.json()).toMatchObject({ status: 'ACCEPTED', phase: 'PRE_BID', currentPriceCents: '16000' });
+      expect(rejectionAttempt.statusCode).toBe(410);
+      expect(rejectionAttempt.json().error.code).toBe('BID_APPROVAL_LEGACY');
 
       const history = await app.inject({ method: 'GET', url: `/v1/lots/${lot.id}/bids?limit=10` });
       expect(history.statusCode).toBe(200);
-      expect(history.json().items).toEqual([expect.objectContaining({ bidRequestId: secondBid.json().bidRequestId, phase: 'PRE_BID', amountCents: '16000' })]);
+      expect(history.json().items).toEqual(expect.arrayContaining([
+        expect.objectContaining({ bidRequestId: firstBid.json().bidRequestId, phase: 'PRE_BID', amountCents: '15000' }),
+        expect.objectContaining({ bidRequestId: secondBid.json().bidRequestId, phase: 'PRE_BID', amountCents: '16000' }),
+      ]));
     } finally {
       context.realtime.close();
       await app.close();

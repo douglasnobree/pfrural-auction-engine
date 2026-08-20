@@ -1,4 +1,4 @@
-import { type AuctionMode as PrismaAuctionMode, type ApprovalMode as PrismaApprovalMode, type LotStatus as PrismaLotStatus } from '@prisma/client';
+import { type AuctionMode as PrismaAuctionMode, type LotStatus as PrismaLotStatus } from '@prisma/client';
 import { Database } from '../../infrastructure/database/db.js';
 import { appendDomainEvent } from '../../infrastructure/events/envelope.js';
 import { DomainError } from '../../domain/errors.js';
@@ -42,7 +42,7 @@ export class ExecutionPublishService {
       if (!auction) {
         auction = await client.auctionExecution.create({ data: {
           externalAuctionId: input.externalAuctionId, title: input.title, mode: input.mode as PrismaAuctionMode, status: 'SCHEDULED', currency: input.currency ?? 'BRL', regulationVersion: input.regulationVersion,
-          approvalMode: input.approvalMode as PrismaApprovalMode | undefined, preBidEnabled: input.preBidEnabled ?? ['TIMED', 'SHOPPING'].includes(input.mode), preBidStartsAt: input.preBidStartsAt ? new Date(input.preBidStartsAt) : null, preBidEndsAt: input.preBidEndsAt ? new Date(input.preBidEndsAt) : null, startsAt: input.startsAt ? new Date(input.startsAt) : null, endsAt: input.endsAt ? new Date(input.endsAt) : null,
+          approvalMode: 'AUTOMATIC', preBidEnabled: input.preBidEnabled ?? ['TIMED', 'SHOPPING'].includes(input.mode), preBidStartsAt: input.preBidStartsAt ? new Date(input.preBidStartsAt) : null, preBidEndsAt: input.preBidEndsAt ? new Date(input.preBidEndsAt) : null, startsAt: input.startsAt ? new Date(input.startsAt) : null, endsAt: input.endsAt ? new Date(input.endsAt) : null,
         } });
         created = true;
       } else {
@@ -51,7 +51,7 @@ export class ExecutionPublishService {
           mode: input.mode as PrismaAuctionMode,
           ...(input.currency ? { currency: input.currency } : {}),
           regulationVersion: input.regulationVersion,
-          ...(input.approvalMode ? { approvalMode: input.approvalMode as PrismaApprovalMode } : {}),
+          approvalMode: 'AUTOMATIC',
           preBidEnabled: input.preBidEnabled ?? ['TIMED', 'SHOPPING'].includes(input.mode),
           ...(input.preBidStartsAt !== undefined ? { preBidStartsAt: input.preBidStartsAt ? new Date(input.preBidStartsAt) : null } : {}),
           ...(input.preBidEndsAt !== undefined ? { preBidEndsAt: input.preBidEndsAt ? new Date(input.preBidEndsAt) : null } : {}),

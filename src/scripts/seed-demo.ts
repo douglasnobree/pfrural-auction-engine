@@ -17,7 +17,7 @@ async function main(): Promise<void> {
   const live = await prisma.auctionExecution.upsert({
     where: { externalAuctionId: 'demo-live' },
     update: { status: 'RUNNING' },
-    create: { externalAuctionId: 'demo-live', title: 'Demo Live Auction', mode: 'LIVE', status: 'RUNNING', regulationVersion: 'demo-v1', approvalMode: 'MANUAL_FIFO', startsAt: now },
+    create: { externalAuctionId: 'demo-live', title: 'Demo Live Auction', mode: 'LIVE', status: 'RUNNING', regulationVersion: 'demo-v1', approvalMode: 'AUTOMATIC', startsAt: now },
   });
   await prisma.auctionLotExecution.upsert({
     where: { auctionId_externalLotId: { auctionId: live.id, externalLotId: 'demo-live-lot-1' } },
