@@ -4,7 +4,7 @@ import { Database, type PrismaTransaction } from '../../infrastructure/database/
 import { appendDomainEvent } from '../../infrastructure/events/envelope.js';
 import { asJson } from '../../infrastructure/database/rows.js';
 import { DomainError, isDomainError } from '../../domain/errors.js';
-import { participantAlias } from '../../domain/identity.js';
+import { participantAlias, readableParticipantName } from '../../domain/identity.js';
 import { evaluateProxyBid } from '../../domain/proxy-bid.js';
 import { parseCents } from '../../domain/money.js';
 import { assertBiddingWindow, isPreBidWindow } from '../../domain/bidding-window.js';
@@ -255,8 +255,12 @@ export class BiddingService {
       const status = sold ? 'SOLD' : 'UNSOLD';
       let awardId: string | null = null;
       let settlementId: string | null = null;
+      let winnerName: string | null = null;
       if (sold && lot.currentPriceCents !== null) {
-        const latest = await client.effectiveBid.findFirst({ where: { lotId: lot.id }, orderBy: { lotSequence: 'desc' } });
+        const latest = await client.effectiveBid.findFirst({ where: { lotId: lot.id, voidedAt: null }, orderBy: { lotSequence: 'desc' }, include: { bidIntent: { select: { displayName: true } } } });
+        winnerName = winner
+          ? readableParticipantName(latest?.bidIntent.displayName) ?? readableParticipantName(lot.currentBidderAlias)
+          : null;
         const award = await client.winnerAward.upsert({
           where: { lotId: lot.id },
           create: { lotId: lot.id, winnerUserId: winner, winningAmountCents: lot.currentPriceCents, sourceEffectiveBidId: latest?.id },
@@ -270,9 +274,9 @@ export class BiddingService {
       await client.auctionLotExecution.update({ where: { id: lot.id }, data: { status, lotSequence: nextSequence, version: newVersion } });
       const payload = {
         lotId: lot.id, externalLotId: lot.externalLotId, status, lotSequence: nextSequence.toString(), version: newVersion.toString(),
-        currentPriceCents: lot.currentPriceCents?.toString() ?? null, currentBidderAlias: winner ? participantAlias(lot.auctionId, winner) : null,
-        currentBidderName: null,
-        winnerName: sold && winner ? participantAlias(lot.auctionId, winner) : null,
+        currentPriceCents: lot.currentPriceCents?.toString() ?? null, currentBidderAlias: winner ? participantAlias(lot.auctionId, winner, winnerName) : null,
+        currentBidderName: winnerName,
+        winnerName: sold && winner ? winnerName : null,
         winningAmountCents: sold ? lot.currentPriceCents?.toString() ?? null : null,
         closedAt: new Date().toISOString(),
         winnerDeclared: sold, awardId, settlementId, serverTime: new Date().toISOString(),
@@ -283,7 +287,7 @@ export class BiddingService {
       });
       if (sold && awardId) await appendDomainEvent(client, {
         eventType: 'winner.declared', routingKey: 'winner.declared', aggregateType: 'winner_award', aggregateId: awardId,
-        auctionId: lot.auctionId, lotId: lot.id, correlationId, actorId, payload: { lotId: lot.id, externalLotId: lot.externalLotId, awardId, settlementId, winnerName: winner ? participantAlias(lot.auctionId, winner) : null, winningAmountCents: lot.currentPriceCents?.toString() ?? null }, writeEventLog: false,
+        auctionId: lot.auctionId, lotId: lot.id, correlationId, actorId, payload: { lotId: lot.id, externalLotId: lot.externalLotId, awardId, settlementId, winnerName, winningAmountCents: lot.currentPriceCents?.toString() ?? null }, writeEventLog: false,
       });
       return payload;
     });
@@ -740,12 +744,12 @@ export class BiddingService {
       ...(effectiveBidId ? { effectiveBidId } : {}), ...(timerExtended ? { timerExtended: true } : {}),
     };
     await client.bidRequest.update({ where: { id: bidRequestId }, data: { status: 'ACCEPTED', result: result as unknown as Prisma.InputJsonValue, completedAt: acceptedAt } });
-    const publicBidderAlias = participantAlias(lot.auctionId, evaluation.leader.userId);
+    const publicBidderAlias = participantAlias(lot.auctionId, evaluation.leader.userId, evaluation.leader.displayName);
     await appendDomainEvent(client, {
       eventType: 'bid.accepted', routingKey: 'bid.accepted', aggregateType: 'auction_lot_execution', aggregateId: lot.id,
       auctionId: lot.auctionId, lotId: lot.id, aggregateVersion: newVersion, lotSequence: nextSequence,
       correlationId: input.correlationId, causationId: bidRequestId, actorId: approvalActorId ?? input.actorId,
-      payload: { bidRequestId, lotId: lot.id, externalLotId: lot.externalLotId, lotSequence: nextSequence.toString(), version: newVersion.toString(), currentPriceCents: effectivePriceCents.toString(), currentIncrementCents: nextIncrement.toString(), nextBidCents: (effectivePriceCents + nextIncrement).toString(), currentBidderAlias: publicBidderAlias, currentBidderName: null, bidOrigin: evaluation.leader.origin, phase, acceptedAt: acceptedAt.toISOString(), endsAt: endsAt?.toISOString() ?? null, timerExtended, serverTime: result.serverTime },
+      payload: { bidRequestId, lotId: lot.id, externalLotId: lot.externalLotId, lotSequence: nextSequence.toString(), version: newVersion.toString(), currentPriceCents: effectivePriceCents.toString(), currentIncrementCents: nextIncrement.toString(), nextBidCents: (effectivePriceCents + nextIncrement).toString(), currentBidderAlias: publicBidderAlias, currentBidderName: evaluation.leader.displayName ?? null, bidOrigin: evaluation.leader.origin, phase, acceptedAt: acceptedAt.toISOString(), endsAt: endsAt?.toISOString() ?? null, timerExtended, serverTime: result.serverTime },
     });
     return result;
   }
