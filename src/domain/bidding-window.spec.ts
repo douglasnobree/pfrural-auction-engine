@@ -23,6 +23,12 @@ describe('auction bidding windows', () => {
     expect(auctionAcceptsBids('LIVE', 'SCHEDULED', false)).toBe(false);
   });
 
+  it('does not open a scheduled timed auction without a configured pre-bid window', () => {
+    expect(auctionAcceptsBids('TIMED', 'SCHEDULED', false)).toBe(false);
+    expect(auctionAcceptsBids('SHOPPING', 'SCHEDULED', false)).toBe(false);
+    expect(() => assertBiddingWindow({ mode: 'TIMED', status: 'SCHEDULED', preBidEnabled: true })).toThrowError('Pre-bidding is not configured');
+  });
+
   it('treats shopping as the pre-bid nomenclature', () => {
     expect(isPreBidWindow('SHOPPING', 'SCHEDULED')).toBe(true);
     expect(auctionAcceptsBids('SHOPPING', 'SCHEDULED')).toBe(true);

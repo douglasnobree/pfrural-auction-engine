@@ -9,7 +9,7 @@ export interface BiddingWindowInput {
 }
 
 export function isPreBidWindow(mode: string, status: string, preBidEnabled = true): boolean {
-  return status === 'SCHEDULED' && (mode === 'TIMED' || mode === 'SHOPPING' || (mode === 'LIVE' && preBidEnabled));
+  return status === 'SCHEDULED' && preBidEnabled && (mode === 'TIMED' || mode === 'SHOPPING' || mode === 'LIVE');
 }
 
 export function isLiveBiddingWindow(mode: string, status: string): boolean {
@@ -42,6 +42,15 @@ export function assertBiddingWindow(input: BiddingWindowInput): void {
   const preBid = isPreBidWindow(input.mode, input.status, input.preBidEnabled ?? true);
   if (!auctionAcceptsBids(input.mode, input.status, input.preBidEnabled ?? true)) {
     throw new DomainError('AUCTION_NOT_OPEN', 'Auction is not accepting bids', 409);
+  }
+
+  const hasPreBidSchedule = Boolean(
+    input.preBidStartsAt ||
+      input.preBidEndsAt ||
+      (input.mode === 'LIVE' && input.auctionStartsAt),
+  );
+  if (preBid && input.mode !== 'LIVE' && !hasPreBidSchedule) {
+    throw new DomainError('PREBID_NOT_CONFIGURED', 'Pre-bidding is not configured', 409);
   }
 
   const now = input.now ?? new Date();

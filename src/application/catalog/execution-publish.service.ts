@@ -36,13 +36,14 @@ export class ExecutionPublishService {
 
   async publish(input: PublishExecutionInput, correlationId: string): Promise<Record<string, unknown>> {
     if (input.lots.length === 0) throw new DomainError('LOTS_REQUIRED', 'At least one lot is required to publish an execution', 422);
+    const preBidEnabled = input.preBidEnabled ?? Boolean(input.preBidStartsAt || input.preBidEndsAt);
     return this.database.transaction(async (client) => {
       let auction = await client.auctionExecution.findUnique({ where: { externalAuctionId: input.externalAuctionId } });
       let created = false;
       if (!auction) {
         auction = await client.auctionExecution.create({ data: {
           externalAuctionId: input.externalAuctionId, title: input.title, mode: input.mode as PrismaAuctionMode, status: 'SCHEDULED', currency: input.currency ?? 'BRL', regulationVersion: input.regulationVersion,
-          approvalMode: 'AUTOMATIC', preBidEnabled: input.preBidEnabled ?? ['TIMED', 'SHOPPING'].includes(input.mode), preBidStartsAt: input.preBidStartsAt ? new Date(input.preBidStartsAt) : null, preBidEndsAt: input.preBidEndsAt ? new Date(input.preBidEndsAt) : null, startsAt: input.startsAt ? new Date(input.startsAt) : null, endsAt: input.endsAt ? new Date(input.endsAt) : null,
+          approvalMode: 'AUTOMATIC', preBidEnabled, preBidStartsAt: input.preBidStartsAt ? new Date(input.preBidStartsAt) : null, preBidEndsAt: input.preBidEndsAt ? new Date(input.preBidEndsAt) : null, startsAt: input.startsAt ? new Date(input.startsAt) : null, endsAt: input.endsAt ? new Date(input.endsAt) : null,
         } });
         created = true;
       } else {
@@ -52,7 +53,7 @@ export class ExecutionPublishService {
           ...(input.currency ? { currency: input.currency } : {}),
           regulationVersion: input.regulationVersion,
           approvalMode: 'AUTOMATIC',
-          preBidEnabled: input.preBidEnabled ?? ['TIMED', 'SHOPPING'].includes(input.mode),
+          preBidEnabled,
           ...(input.preBidStartsAt !== undefined ? { preBidStartsAt: input.preBidStartsAt ? new Date(input.preBidStartsAt) : null } : {}),
           ...(input.preBidEndsAt !== undefined ? { preBidEndsAt: input.preBidEndsAt ? new Date(input.preBidEndsAt) : null } : {}),
           ...(input.startsAt !== undefined ? { startsAt: input.startsAt ? new Date(input.startsAt) : null } : {}),
