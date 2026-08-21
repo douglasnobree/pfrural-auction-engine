@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assertBiddingWindow, auctionAcceptsBids, isLiveBiddingWindow, isPreBidWindow } from './bidding-window.js';
+import { assertBiddingWindow, auctionAcceptsBids, isLiveBiddingWindow, isPreBidExpired, isPreBidWindow, preBidCutoffAt } from './bidding-window.js';
 
 describe('auction bidding windows', () => {
   it('keeps timed auctions available for pre-bids while scheduled', () => {
@@ -32,5 +32,20 @@ describe('auction bidding windows', () => {
   it('enforces the configured pre-bid dates', () => {
     expect(() => assertBiddingWindow({ mode: 'LIVE', status: 'SCHEDULED', preBidEnabled: true, preBidStartsAt: new Date('2026-08-05T12:00:00.000Z'), auctionStartsAt: new Date('2026-08-05T14:00:00.000Z'), now: new Date('2026-08-05T11:59:00.000Z') })).toThrowError('Pre-bidding has not started');
     expect(() => assertBiddingWindow({ mode: 'LIVE', status: 'SCHEDULED', preBidEnabled: true, auctionStartsAt: new Date('2026-08-05T14:00:00.000Z'), now: new Date('2026-08-05T14:00:00.000Z') })).toThrowError('Pre-bidding has ended');
+  });
+
+  it('uses the live start as the fallback cutoff when no live pre-bid end is configured', () => {
+    const startsAt = new Date('2026-08-05T14:00:00.000Z');
+    expect(preBidCutoffAt({ mode: 'LIVE', preBidEnabled: true, auctionStartsAt: startsAt })).toEqual(startsAt);
+    expect(isPreBidExpired({ mode: 'LIVE', preBidEnabled: true, auctionStartsAt: startsAt }, startsAt)).toBe(true);
+  });
+
+  it('does not reopen a timed auction after its pre-bid cutoff', () => {
+    expect(() => assertBiddingWindow({
+      mode: 'TIMED',
+      status: 'RUNNING',
+      preBidEndsAt: new Date('2026-08-05T14:00:00.000Z'),
+      now: new Date('2026-08-05T14:00:00.000Z'),
+    })).toThrowError('Pre-bidding has ended');
   });
 });

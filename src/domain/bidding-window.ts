@@ -20,6 +20,24 @@ export function auctionAcceptsBids(mode: string, status: string, preBidEnabled =
   return isPreBidWindow(mode, status, preBidEnabled) || isLiveBiddingWindow(mode, status);
 }
 
+export function preBidCutoffAt(input: {
+  mode: string;
+  preBidEnabled?: boolean;
+  preBidEndsAt?: Date | null;
+  auctionStartsAt?: Date | null;
+}): Date | null {
+  if (input.preBidEnabled === false) return null;
+  return input.preBidEndsAt ?? (input.mode === 'LIVE' ? input.auctionStartsAt ?? null : null);
+}
+
+export function isPreBidExpired(
+  input: Parameters<typeof preBidCutoffAt>[0],
+  now = new Date(),
+): boolean {
+  const cutoff = preBidCutoffAt(input);
+  return cutoff !== null && now >= cutoff;
+}
+
 export function assertBiddingWindow(input: BiddingWindowInput): void {
   const preBid = isPreBidWindow(input.mode, input.status, input.preBidEnabled ?? true);
   if (!auctionAcceptsBids(input.mode, input.status, input.preBidEnabled ?? true)) {
@@ -31,8 +49,8 @@ export function assertBiddingWindow(input: BiddingWindowInput): void {
     throw new DomainError('PREBID_NOT_STARTED', 'Pre-bidding has not started', 409);
   }
 
-  const preBidEndsAt = input.preBidEndsAt ?? (input.mode === 'LIVE' ? input.auctionStartsAt : null);
-  if (preBid && preBidEndsAt && now >= preBidEndsAt) {
+  const automaticPreBidMode = input.mode !== 'LIVE' && ['SCHEDULED', 'RUNNING'].includes(input.status);
+  if ((preBid || automaticPreBidMode) && isPreBidExpired(input, now)) {
     throw new DomainError('PREBID_CLOSED', 'Pre-bidding has ended', 409);
   }
 }

@@ -3,6 +3,7 @@ import type { PrismaTransaction } from '../../infrastructure/database/db.js';
 import { Database } from '../../infrastructure/database/db.js';
 import { appendDomainEvent } from '../../infrastructure/events/envelope.js';
 import { DomainError } from '../../domain/errors.js';
+import { preBidCutoffAt } from '../../domain/bidding-window.js';
 import { assertAuctionTransition, assertLotTransition } from '../../domain/state-machine.js';
 import type { AuctionStatus, LotStatus } from '../../domain/types.js';
 import { BiddingService } from '../bidding/bidding.service.js';
@@ -12,7 +13,7 @@ export class ManagerService {
 
   async auctionCommand(auctionId: string, action: 'start' | 'pause' | 'resume' | 'finish', actorId: string, idempotencyKey: string, expectedVersion: bigint | undefined, correlationId: string): Promise<Record<string, unknown>> {
     const target: Record<typeof action, AuctionStatus> = { start: 'RUNNING', pause: 'PAUSED', resume: 'RUNNING', finish: 'FINISHED' };
-    if (action === 'finish') await this.closeScheduledPreBidLots(auctionId, actorId, correlationId);
+    if (action === 'finish') await this.closePreBidLots(auctionId, actorId, correlationId);
     return this.database.transaction(async (client) => {
       const saved = await this.findAction(client, actorId, idempotencyKey);
       if (saved) return saved;
@@ -31,9 +32,80 @@ export class ManagerService {
     });
   }
 
-  private async closeScheduledPreBidLots(auctionId: string, actorId: string, correlationId: string): Promise<void> {
+  async expirePreBidWindows(now = new Date()): Promise<{ finishedAuctions: number; pausedLiveLots: number }> {
+    const dueAuctions = await this.database.prisma.auctionExecution.findMany({
+      where: {
+        status: { in: ['SCHEDULED', 'RUNNING', 'PAUSED'] },
+        OR: [
+          {
+            mode: { in: ['TIMED', 'SHOPPING'] },
+            preBidEnabled: true,
+            preBidEndsAt: { lte: now },
+          },
+          {
+            mode: 'LIVE',
+            status: 'SCHEDULED',
+            preBidEnabled: true,
+            OR: [
+              { preBidEndsAt: { lte: now } },
+              { preBidEndsAt: null, startsAt: { lte: now } },
+            ],
+          },
+        ],
+      },
+      select: { id: true, mode: true, preBidEndsAt: true, startsAt: true },
+      take: 100,
+    });
+
+    let finishedAuctions = 0;
+    let pausedLiveLots = 0;
+    const actorId = 'system:prebid-lifecycle';
+
+    for (const auction of dueAuctions) {
+      const cutoff = preBidCutoffAt({
+        mode: auction.mode,
+        preBidEnabled: true,
+        preBidEndsAt: auction.preBidEndsAt,
+        auctionStartsAt: auction.startsAt,
+      });
+      if (!cutoff || now < cutoff) continue;
+
+      if (auction.mode === 'LIVE') {
+        const openLots = await this.database.prisma.auctionLotExecution.findMany({
+          where: { auctionId: auction.id, status: 'OPEN' },
+          select: { id: true },
+        });
+        for (const lot of openLots) {
+          await this.lotCommand(
+            lot.id,
+            'pause',
+            actorId,
+            `prebid-expiration:pause:${lot.id}`,
+            undefined,
+            `prebid-expiration:${auction.id}`,
+          );
+          pausedLiveLots += 1;
+        }
+        continue;
+      }
+
+      await this.auctionCommand(
+        auction.id,
+        'finish',
+        actorId,
+        `prebid-expiration:finish:${auction.id}`,
+        undefined,
+        `prebid-expiration:${auction.id}`,
+      );
+      finishedAuctions += 1;
+    }
+
+    return { finishedAuctions, pausedLiveLots };
+  }
+
+  private async closePreBidLots(auctionId: string, actorId: string, correlationId: string): Promise<void> {
     const auction = await this.database.prisma.auctionExecution.findUnique({ where: { id: auctionId }, select: { mode: true, status: true } });
-    if (!auction || auction.mode === 'LIVE' || auction.status !== 'SCHEDULED') return;
+    if (!auction || auction.mode === 'LIVE' || !['SCHEDULED', 'RUNNING', 'PAUSED'].includes(auction.status)) return;
     const lots = await this.database.prisma.auctionLotExecution.findMany({ where: { auctionId, status: { in: ['OPEN', 'PAUSED', 'CLOSING'] } }, select: { id: true } });
     for (const lot of lots) await this.bidding.closeLot(lot.id, correlationId, actorId);
   }
