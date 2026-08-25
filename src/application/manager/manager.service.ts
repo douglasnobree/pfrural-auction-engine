@@ -119,11 +119,25 @@ export class ManagerService {
       const lot = await client.auctionLotExecution.findUnique({ where: { id: lotId } });
       if (!lot) throw new DomainError('LOT_NOT_FOUND', 'Lot not found', 404);
       if (expectedVersion !== undefined && expectedVersion !== lot.version) throw new DomainError('VERSION_CONFLICT', 'Lot version is stale', 409, { currentVersion: lot.version.toString() });
+      await client.$queryRaw`SELECT id FROM auction_execution WHERE id = ${lot.auctionId}::uuid FOR UPDATE`;
+      const auction = await client.auctionExecution.findUnique({
+        where: { id: lot.auctionId },
+        select: {
+          currentLotId: true,
+          currentLot: { select: { status: true } },
+        },
+      });
       const status: LotStatus = action === 'open' ? 'OPEN' : action === 'pause' ? 'PAUSED' : action === 'resume' ? 'OPEN' : 'CANCELLED';
       assertLotTransition(lot.status, status);
       const version = lot.version + 1n;
       const lotSequence = lot.lotSequence + 1n;
       const openingNow = status === 'OPEN' && lot.status !== 'OPEN';
+      const promotesCurrentLot =
+        status === 'OPEN' &&
+        auction?.currentLotId !== lot.id &&
+        (!auction?.currentLotId ||
+          !auction.currentLot ||
+          ['SOLD', 'UNSOLD', 'CANCELLED'].includes(auction.currentLot.status));
       const openingTime = new Date();
       await client.auctionLotExecution.update({
         where: { id: lotId },
@@ -135,6 +149,12 @@ export class ManagerService {
           ...(openingNow && (!lot.endsAt || lot.endsAt <= openingTime) ? { endsAt: new Date(openingTime.getTime() + 30 * 60 * 1000) } : {}),
         },
       });
+      if (promotesCurrentLot) {
+        await client.auctionExecution.update({
+          where: { id: lot.auctionId },
+          data: { currentLotId: lot.id, version: { increment: 1 } },
+        });
+      }
       const response = {
         lotId,
         externalLotId: lot.externalLotId,
