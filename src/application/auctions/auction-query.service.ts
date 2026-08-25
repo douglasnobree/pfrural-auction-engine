@@ -58,6 +58,7 @@ export class AuctionQueryService {
     return {
       auction: {
         id: auction.id, externalId: auction.externalAuctionId, title: auction.title, mode: auction.mode, status: auction.status,
+        currentLotId: auction.currentLotId,
         currency: auction.currency.trim(), regulationVersion: auction.regulationVersion, approvalMode: 'AUTOMATIC',
         preBidEnabled: auction.preBidEnabled, preBidStartsAt: asDate(auction.preBidStartsAt)?.toISOString() ?? null, preBidEndsAt: asDate(auction.preBidEndsAt)?.toISOString() ?? null,
         version: asBigInt(auction.version).toString(), startsAt: asDate(auction.startsAt)?.toISOString() ?? null, endsAt: asDate(auction.endsAt)?.toISOString() ?? null,
