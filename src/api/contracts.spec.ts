@@ -7,6 +7,20 @@ describe('auction API contracts', () => {
     expect(parseBody(floorBidBody, { participantId: 'user-phone', amountCents: '13000', origin: 'PHONE' })).toMatchObject({ origin: 'PHONE', amountCents: '13000' });
   });
 
+  it('accepts an opaque quick participant identity without carrying its document', () => {
+    expect(parseBody(floorBidBody, {
+      participantId: 'quick:507f1f77bcf86cd799439011',
+      amountCents: '12500',
+      origin: 'PHONE',
+      displayName: 'Maria da Silva',
+    })).toEqual({
+      participantId: 'quick:507f1f77bcf86cd799439011',
+      amountCents: '12500',
+      origin: 'PHONE',
+      displayName: 'Maria da Silva',
+    });
+  });
+
   it('validates manager pagination limits and preserves the opaque cursor', () => {
     expect(registrationListQuery.parse({ limit: '20', cursor: 'opaque-cursor' })).toEqual({ limit: 20, cursor: 'opaque-cursor' });
     expect(() => registrationListQuery.parse({ limit: '101' })).toThrow();
