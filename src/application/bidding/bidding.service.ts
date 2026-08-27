@@ -107,6 +107,21 @@ export interface PendingBidApproval {
   receivedAt: string;
 }
 
+export interface PendingEligibilityBid {
+  bidRequestId: string;
+  lotId: string;
+  externalLotId: string;
+  lotNumber: number;
+  lotTitle: string;
+  participantId: string;
+  displayName: string | null;
+  amountCents: string;
+  origin: BidOrigin;
+  phase: BidPhase | null;
+  status: 'PENDING_ELIGIBILITY';
+  receivedAt: string;
+}
+
 export class BiddingService {
   constructor(private readonly database: Database) {}
 
@@ -580,6 +595,32 @@ export class BiddingService {
         origin: row.origin,
         phase: row.phase as BidPhase | null,
         status: 'PENDING_APPROVAL',
+        receivedAt: row.receivedAt.toISOString(),
+      })),
+    };
+  }
+
+  async listPendingEligibilityBids(auctionId: string, lotId?: string, limit = 100): Promise<{ items: PendingEligibilityBid[]; hasMore: boolean }> {
+    const rows = await this.database.prisma.bidRequest.findMany({
+      where: { status: 'PENDING_ELIGIBILITY', lot: { auctionId, ...(lotId ? { id: lotId } : {}) } },
+      include: { lot: { select: { externalLotId: true, lotNumber: true, title: true } } },
+      orderBy: [{ receivedAt: 'asc' }, { id: 'asc' }],
+      take: limit + 1,
+    });
+    return {
+      hasMore: rows.length > limit,
+      items: rows.slice(0, limit).map((row) => ({
+        bidRequestId: row.id,
+        lotId: row.lotId,
+        externalLotId: row.lot.externalLotId,
+        lotNumber: row.lot.lotNumber,
+        lotTitle: row.lot.title,
+        participantId: row.userId,
+        displayName: row.displayName,
+        amountCents: row.requestedAmountCents.toString(),
+        origin: row.origin,
+        phase: row.phase as BidPhase | null,
+        status: 'PENDING_ELIGIBILITY',
         receivedAt: row.receivedAt.toISOString(),
       })),
     };

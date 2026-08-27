@@ -183,6 +183,11 @@ describe.skipIf(!runIntegration)('auction engine API integration', () => {
       expect(deferredBid.statusCode).toBe(200);
       expect(deferredBid.json()).toMatchObject({ status: 'PENDING_ELIGIBILITY', currentPriceCents: null, lotSequence: '0' });
 
+      const managerHeaders = { 'x-user-id': 'deferred-manager', 'x-actor-role': 'manager', 'x-internal-token': process.env.INTERNAL_SERVICE_TOKEN ?? 'local-development-token' };
+      const pendingEligibility = await app.inject({ method: 'GET', url: `/v1/manager/auctions/${auction.id}/pending-eligibility-bids?lotId=${lot.id}&limit=10`, headers: managerHeaders });
+      expect(pendingEligibility.statusCode).toBe(200);
+      expect(pendingEligibility.json()).toMatchObject({ hasMore: false, items: [expect.objectContaining({ bidRequestId: deferredBid.json().bidRequestId, lotId: lot.id, participantId: 'deferred-user', amountCents: '15000', status: 'PENDING_ELIGIBILITY' })] });
+
       const historyBeforeApproval = await app.inject({ method: 'GET', url: `/v1/lots/${lot.id}/bids?limit=10` });
       expect(historyBeforeApproval.statusCode).toBe(200);
       expect(historyBeforeApproval.json()).toMatchObject({ items: [], hasMore: false });
@@ -190,7 +195,6 @@ describe.skipIf(!runIntegration)('auction engine API integration', () => {
       expect(snapshotBeforeApproval.json().lots[0]).toMatchObject({ currentPriceCents: null, lotSequence: '0', version: '0' });
 
       const savedRegistration = await context.database.prisma.auctionRegistration.findUniqueOrThrow({ where: { auctionId_userId: { auctionId: auction.id, userId: 'deferred-user' } } });
-      const managerHeaders = { 'x-user-id': 'deferred-manager', 'x-actor-role': 'manager', 'x-internal-token': process.env.INTERNAL_SERVICE_TOKEN ?? 'local-development-token' };
       const enabled = await app.inject({
         method: 'PUT',
         url: `/v1/manager/auctions/${auction.id}/registrations/${savedRegistration.id}`,
