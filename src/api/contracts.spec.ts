@@ -1,10 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { floorBidBody, parseBody, publishExecutionBody, registrationListQuery } from './contracts.js';
+import { acquisitionSource, floorBidBody, parseBody, publishExecutionBody, registrationBody, registrationListQuery } from './contracts.js';
 
 describe('auction API contracts', () => {
   it('keeps floor and phone bids as explicit origins', () => {
     expect(parseBody(floorBidBody, { participantId: 'user-floor', amountCents: '12500', origin: 'FLOOR' })).toMatchObject({ origin: 'FLOOR', amountCents: '12500' });
     expect(parseBody(floorBidBody, { participantId: 'user-phone', amountCents: '13000', origin: 'PHONE' })).toMatchObject({ origin: 'PHONE', amountCents: '13000' });
+  });
+
+  it('validates acquisition sources independently from bid origins', () => {
+    expect(acquisitionSource.parse('WHATSAPP')).toBe('WHATSAPP');
+    expect(parseBody(registrationBody, { termsVersion: 'v1', acquisitionSource: 'FACEBOOK' })).toEqual({ termsVersion: 'v1', acquisitionSource: 'FACEBOOK' });
+    expect(() => parseBody(registrationBody, { termsVersion: 'v1', acquisitionSource: 'PHONE' })).toThrow();
+    expect(parseBody(floorBidBody, { participantId: 'user-floor', amountCents: '12500', origin: 'FLOOR', acquisitionSource: 'REFERRAL' }).acquisitionSource).toBe('REFERRAL');
   });
 
   it('accepts an opaque quick participant identity without carrying its document', () => {

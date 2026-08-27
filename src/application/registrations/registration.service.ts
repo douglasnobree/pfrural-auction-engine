@@ -13,13 +13,14 @@ export interface RegistrationPage {
   nextCursor: string | null;
   hasMore: boolean;
 }
-import { Prisma } from '@prisma/client';
+import { Prisma, type AcquisitionSource as PrismaAcquisitionSource } from '@prisma/client';
+import type { AcquisitionSource } from '../../domain/types.js';
 import type { BiddingService } from '../bidding/bidding.service.js';
 
 export class RegistrationService {
   constructor(private readonly database: Database, private readonly bidding?: BiddingService) {}
 
-  async register(auctionId: string, userId: string, termsVersion: string, idempotencyKey: string, correlationId: string, globallyEnabled = false): Promise<Record<string, unknown>> {
+  async register(auctionId: string, userId: string, termsVersion: string, idempotencyKey: string, correlationId: string, globallyEnabled = false, acquisitionSource: AcquisitionSource = 'UNKNOWN'): Promise<Record<string, unknown>> {
     if (!termsVersion.trim()) throw new DomainError('TERMS_VERSION_REQUIRED', 'termsVersion is required', 400);
     return this.database.transaction(async (client) => {
       const auction = await client.auctionExecution.findUnique({ where: { id: auctionId } });
@@ -29,29 +30,32 @@ export class RegistrationService {
         if (existing.termsVersion !== termsVersion && existing.status === 'APPROVED') {
           throw new DomainError('REGISTRATION_TERMS_CONFLICT', 'An approved registration cannot change terms version', 409);
         }
+        const shouldCaptureSource = existing.acquisitionSource === 'UNKNOWN' && acquisitionSource !== 'UNKNOWN';
         const registration = globallyEnabled && existing.status !== 'APPROVED'
-          ? await client.auctionRegistration.update({ where: { id: existing.id }, data: { status: 'APPROVED' } })
-          : existing;
+          ? await client.auctionRegistration.update({ where: { id: existing.id }, data: { status: 'APPROVED', ...(shouldCaptureSource ? { acquisitionSource: acquisitionSource as PrismaAcquisitionSource } : {}) } })
+          : shouldCaptureSource
+            ? await client.auctionRegistration.update({ where: { id: existing.id }, data: { acquisitionSource: acquisitionSource as PrismaAcquisitionSource } })
+            : existing;
         if (registration.status === 'APPROVED' && existing.status !== 'APPROVED') await appendDomainEvent(client, {
           eventType: 'registration.approved', routingKey: 'registration.approved', aggregateType: 'auction_registration', aggregateId: registration.id,
-          auctionId, correlationId, causationId: idempotencyKey, payload: { registrationId: registration.id, auctionId, userId, termsVersion: registration.termsVersion }, writeEventLog: false,
+          auctionId, correlationId, causationId: idempotencyKey, payload: { registrationId: registration.id, auctionId, userId, termsVersion: registration.termsVersion, acquisitionSource: registration.acquisitionSource }, writeEventLog: false,
         });
-        return { registrationId: registration.id, auctionId, userId, status: registration.status, termsVersion: registration.termsVersion, acceptedAt: registration.acceptedAt.toISOString() };
+        return { registrationId: registration.id, auctionId, userId, status: registration.status, termsVersion: registration.termsVersion, acquisitionSource: registration.acquisitionSource, acceptedAt: registration.acceptedAt.toISOString() };
       }
       const status = globallyEnabled ? 'APPROVED' : 'PENDING';
-      const created = await client.auctionRegistration.create({ data: { auctionId, userId, status, termsVersion } });
+      const created = await client.auctionRegistration.create({ data: { auctionId, userId, status, termsVersion, acquisitionSource: acquisitionSource as PrismaAcquisitionSource } });
       const registrationId = created.id;
       await appendDomainEvent(client, {
         eventType: globallyEnabled ? 'registration.approved' : 'registration.requested', routingKey: globallyEnabled ? 'registration.approved' : 'registration.requested', aggregateType: 'auction_registration', aggregateId: registrationId,
-        auctionId, correlationId, causationId: idempotencyKey, payload: { registrationId, auctionId, userId, termsVersion }, writeEventLog: false,
+        auctionId, correlationId, causationId: idempotencyKey, payload: { registrationId, auctionId, userId, termsVersion, acquisitionSource: created.acquisitionSource }, writeEventLog: false,
       });
-      return { registrationId, auctionId, userId, status, termsVersion, acceptedAt: created.acceptedAt.toISOString() };
+      return { registrationId, auctionId, userId, status, termsVersion, acquisitionSource: created.acquisitionSource, acceptedAt: created.acceptedAt.toISOString() };
     });
   }
 
   async getForUser(auctionId: string, userId: string): Promise<Record<string, unknown> | null> {
     const registration = await this.database.prisma.auctionRegistration.findUnique({ where: { auctionId_userId: { auctionId, userId } } });
-    return registration ? { registrationId: registration.id, auctionId, userId, status: registration.status, termsVersion: registration.termsVersion, acceptedAt: registration.acceptedAt.toISOString() } : null;
+    return registration ? { registrationId: registration.id, auctionId, userId, status: registration.status, termsVersion: registration.termsVersion, acquisitionSource: registration.acquisitionSource, acceptedAt: registration.acceptedAt.toISOString() } : null;
   }
 
   async listForAuction(auctionId: string, query: RegistrationListQuery = {}): Promise<RegistrationPage> {
@@ -82,6 +86,7 @@ export class RegistrationService {
       status: registration.status,
       enabled: registration.status === 'APPROVED',
       termsVersion: registration.termsVersion,
+      acquisitionSource: registration.acquisitionSource,
       acceptedAt: registration.acceptedAt.toISOString(),
     }));
     const last = registrations.at(limit - 1);
@@ -111,6 +116,7 @@ export class RegistrationService {
         status: updated.status,
         enabled: updated.status === 'APPROVED',
         termsVersion: updated.termsVersion,
+        acquisitionSource: updated.acquisitionSource,
         acceptedAt: updated.acceptedAt.toISOString(),
       };
       await client.managerAction.create({ data: { actorId, action: enabled ? 'enable-registration' : 'disable-registration', targetType: 'auction_registration', targetId: registrationId, idempotencyKey, result: result as Prisma.InputJsonValue } });

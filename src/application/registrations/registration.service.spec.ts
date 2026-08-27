@@ -26,7 +26,7 @@ describe('RegistrationService', () => {
     const result = await service.register('auction-id', 'user-id', 'terms-v1', 'registration-key', 'correlation-id');
 
     expect(result).toMatchObject({ registrationId: 'registration-id', status: 'PENDING', userId: 'user-id' });
-    expect(client.auctionRegistration.create).toHaveBeenCalledWith({ data: { auctionId: 'auction-id', userId: 'user-id', status: 'PENDING', termsVersion: 'terms-v1' } });
+    expect(client.auctionRegistration.create).toHaveBeenCalledWith({ data: { auctionId: 'auction-id', userId: 'user-id', status: 'PENDING', termsVersion: 'terms-v1', acquisitionSource: 'UNKNOWN' } });
     expect(client.outboxEvent.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ eventType: 'registration.requested' }) }));
   });
 
@@ -45,7 +45,7 @@ describe('RegistrationService', () => {
     const result = await service.register('auction-id', 'user-id', 'terms-v1', 'registration-key', 'correlation-id', true);
 
     expect(result).toMatchObject({ registrationId: 'registration-id', status: 'APPROVED', userId: 'user-id' });
-    expect(client.auctionRegistration.create).toHaveBeenCalledWith({ data: { auctionId: 'auction-id', userId: 'user-id', status: 'APPROVED', termsVersion: 'terms-v1' } });
+    expect(client.auctionRegistration.create).toHaveBeenCalledWith({ data: { auctionId: 'auction-id', userId: 'user-id', status: 'APPROVED', termsVersion: 'terms-v1', acquisitionSource: 'UNKNOWN' } });
     expect(client.outboxEvent.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ eventType: 'registration.approved' }) }));
   });
 
@@ -70,6 +70,22 @@ describe('RegistrationService', () => {
     expect(result).toMatchObject({ registrationId: 'registration-id', status: 'APPROVED', enabled: true });
     expect(client.managerAction.create).toHaveBeenCalledWith({ data: expect.objectContaining({ action: 'enable-registration', idempotencyKey: 'approval-key' }) });
     expect(client.outboxEvent.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ eventType: 'registration.approved' }) }));
+  });
+
+  it('captures a non-unknown source on an existing registration without replacing it later', async () => {
+    const acceptedAt = new Date('2026-08-05T12:00:00.000Z');
+    const client = {
+      auctionExecution: { findUnique: vi.fn().mockResolvedValue({ id: 'auction-id' }) },
+      auctionRegistration: {
+        findUnique: vi.fn().mockResolvedValue({ id: 'registration-id', auctionId: 'auction-id', userId: 'user-id', status: 'PENDING', termsVersion: 'terms-v1', acquisitionSource: 'UNKNOWN', acceptedAt }),
+        update: vi.fn().mockResolvedValue({ id: 'registration-id', auctionId: 'auction-id', userId: 'user-id', status: 'PENDING', termsVersion: 'terms-v1', acquisitionSource: 'WHATSAPP', acceptedAt }),
+      },
+      outboxEvent: { create: vi.fn().mockResolvedValue({}) },
+    };
+    const service = serviceWithClient(client);
+
+    await expect(service.register('auction-id', 'user-id', 'terms-v1', 'registration-key', 'correlation-id', false, 'WHATSAPP')).resolves.toMatchObject({ acquisitionSource: 'WHATSAPP' });
+    expect(client.auctionRegistration.update).toHaveBeenCalledWith({ where: { id: 'registration-id' }, data: { acquisitionSource: 'WHATSAPP' } });
   });
 
   it('releases deferred bids after enabling the participant', async () => {

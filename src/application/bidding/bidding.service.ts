@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { Prisma, type BidOrigin as PrismaBidOrigin, type BidPhase as PrismaBidPhase } from '@prisma/client';
+import { Prisma, type AcquisitionSource as PrismaAcquisitionSource, type BidOrigin as PrismaBidOrigin, type BidPhase as PrismaBidPhase } from '@prisma/client';
 import { Database, type PrismaTransaction } from '../../infrastructure/database/db.js';
 import { appendDomainEvent } from '../../infrastructure/events/envelope.js';
 import { asJson } from '../../infrastructure/database/rows.js';
@@ -10,7 +10,7 @@ import { parseCents } from '../../domain/money.js';
 import { assertBiddingWindow, isPreBidWindow } from '../../domain/bidding-window.js';
 import { BID_APPROVAL_FEATURE_ENABLED, requiresManagerApproval } from '../../domain/bid-approval.js';
 import { activeIncrementCents, advanceIncrementState, nextBidCents as calculateNextBidCents, openingBidCents } from '../../domain/bid-increment.js';
-import type { BidOrigin, BidPhase, ProxyEntry } from '../../domain/types.js';
+import type { AcquisitionSource, BidOrigin, BidPhase, ProxyEntry } from '../../domain/types.js';
 
 export interface PlaceBidInput {
   lotId: string;
@@ -24,6 +24,7 @@ export interface PlaceBidInput {
   actorId?: string;
   displayName?: string;
   autoApproveRegistration?: boolean;
+  acquisitionSource?: AcquisitionSource;
 }
 
 export interface BidCommandResult {
@@ -60,6 +61,7 @@ export interface BidHistoryItem {
   acceptedAt: string;
   createdAt: string;
   bidderAlias: string;
+  participantId?: string;
   status: 'ACTIVE' | 'VOIDED';
   voidedAt?: string;
   voidReason?: string;
@@ -314,6 +316,7 @@ export class BiddingService {
       acceptedAt: row.bidIntent.approvedAt?.toISOString() ?? row.createdAt.toISOString(),
       createdAt: row.createdAt.toISOString(),
       bidderAlias: participantAlias(row.lot.auctionId, row.userId, row.bidIntent.displayName),
+      ...(includeVoided ? { participantId: row.userId } : {}),
       status: row.voidedAt ? 'VOIDED' as const : 'ACTIVE' as const,
       ...(includeVoided && row.voidedAt ? { voidedAt: row.voidedAt.toISOString(), ...(row.voidReason ? { voidReason: row.voidReason } : {}) } : {}),
       ...(includeVoided ? {
@@ -644,11 +647,17 @@ export class BiddingService {
 
   private async ensureManagerRegistration(client: PrismaTransaction, lot: LockedLot, input: PlaceBidInput): Promise<void> {
     const existing = await client.auctionRegistration.findUnique({ where: { auctionId_userId: { auctionId: lot.auctionId, userId: input.userId } } });
-    if (existing?.status === 'APPROVED') return;
+    const acquisitionSource = input.acquisitionSource ?? 'UNKNOWN';
+    if (existing?.status === 'APPROVED') {
+      if (existing.acquisitionSource === 'UNKNOWN' && acquisitionSource !== 'UNKNOWN') {
+        await client.auctionRegistration.update({ where: { id: existing.id }, data: { acquisitionSource: acquisitionSource as PrismaAcquisitionSource } });
+      }
+      return;
+    }
 
     const registration = existing
       ? await client.auctionRegistration.update({ where: { id: existing.id }, data: { status: 'APPROVED' } })
-      : await client.auctionRegistration.create({ data: { auctionId: lot.auctionId, userId: input.userId, status: 'APPROVED', termsVersion: lot.auction.regulationVersion } });
+      : await client.auctionRegistration.create({ data: { auctionId: lot.auctionId, userId: input.userId, status: 'APPROVED', termsVersion: lot.auction.regulationVersion, acquisitionSource: acquisitionSource as PrismaAcquisitionSource } });
 
     await appendDomainEvent(client, {
       eventType: 'registration.approved',

@@ -12,7 +12,8 @@ export const pendingBidsQuery = z.object({
   lotId: z.string().uuid().optional(),
   limit: positiveHistoryLimit.optional(),
 });
-export const registrationBody = z.object({ termsVersion: z.string().trim().min(1).max(100) });
+export const acquisitionSource = z.enum(['DIRECT', 'WHATSAPP', 'FACEBOOK', 'INSTAGRAM', 'GOOGLE', 'TIKTOK', 'REFERRAL', 'ORGANIC', 'OTHER', 'UNKNOWN']);
+export const registrationBody = z.object({ termsVersion: z.string().trim().min(1).max(100), acquisitionSource: acquisitionSource.optional() });
 export const internalRegistrationBody = registrationBody.extend({ globallyEnabled: z.boolean().optional() });
 export const registrationApprovalBody = z.object({ enabled: z.boolean() });
 export const registrationListQuery = z.object({
@@ -22,7 +23,7 @@ export const registrationListQuery = z.object({
 export const bidBody = z.object({ amountCents: z.union([z.string().regex(/^\d+$/), z.number().int().positive()]), commandId: z.string().min(8).max(128).optional(), expectedVersion: z.string().regex(/^\d+$/).optional(), displayName: z.string().trim().min(1).max(120).optional() });
 export const proxyBidBody = bidBody;
 export const managerBody = z.object({ expectedVersion: z.string().regex(/^\d+$/).optional() });
-export const floorBidBody = z.object({ participantId: z.string().min(1).max(200), amountCents: z.union([z.string().regex(/^\d+$/), z.number().int().positive()]), origin: z.enum(['FLOOR', 'PHONE']), expectedVersion: z.string().regex(/^\d+$/).optional(), displayName: z.string().trim().min(1).max(120).optional() });
+export const floorBidBody = z.object({ participantId: z.string().min(1).max(200), amountCents: z.union([z.string().regex(/^\d+$/), z.number().int().positive()]), origin: z.enum(['FLOOR', 'PHONE']), acquisitionSource: acquisitionSource.optional(), expectedVersion: z.string().regex(/^\d+$/).optional(), displayName: z.string().trim().min(1).max(120).optional() });
 export const bidManagementUpdateBody = z.object({ amountCents: z.union([z.string().regex(/^\d+$/), z.number().int().positive()]), reason: z.string().trim().min(3).max(500), expectedVersion: z.string().regex(/^\d+$/).optional() });
 export const bidManagementDeleteBody = z.object({ reason: z.string().trim().min(3).max(500), expectedVersion: z.string().regex(/^\d+$/).optional() });
 export const currentLotBody = z.object({ lotId: z.string().uuid(), expectedVersion: z.string().regex(/^\d+$/).optional() });

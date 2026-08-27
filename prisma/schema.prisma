@@ -57,6 +57,19 @@ enum BidOrigin {
   FLOOR
   PHONE
 }
+
+enum AcquisitionSource {
+  DIRECT
+  WHATSAPP
+  FACEBOOK
+  INSTAGRAM
+  GOOGLE
+  TIKTOK
+  REFERRAL
+  ORGANIC
+  OTHER
+  UNKNOWN
+}
 enum BidPhase {
   PRE_BID
   LIVE_BID
@@ -162,6 +175,7 @@ model AuctionRegistration {
   userId      String             @map("user_id")
   status      RegistrationStatus  @default(PENDING)
   termsVersion String            @map("terms_version")
+  acquisitionSource AcquisitionSource @default(UNKNOWN) @map("acquisition_source")
   acceptedAt  DateTime            @default(now()) @map("accepted_at")
   createdAt   DateTime            @default(now()) @map("created_at")
   @@unique([auctionId, userId])
