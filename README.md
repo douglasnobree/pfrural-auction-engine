@@ -13,7 +13,7 @@ O scaffold é executável e inclui:
 - fechamento idempotente, `winner_award` e settlement pendente;
 - registros de origem `ONLINE`, `PROXY`, `FLOOR` e `PHONE`;
 - comandos auditados de manager para `LIVE`, stream, lote corrente e venda/retirada;
-- reserva transacional inicial para `SHOPPING`;
+- compra imediata transacional para `SHOPPING`;
 - Prisma ORM com migration PostgreSQL versionada e testes de domínio/integrados;
 - sandbox de desenvolvimento idempotente para criar uma execução TIMED nova em um clique, sem misturar dados do catálogo.
 
@@ -102,7 +102,7 @@ O frontend adiciona o proxy `app/api/auction-engine/[...path]`, Server Actions, 
 
 ### Regras de negócio de lance
 
-- `TIMED` e `SHOPPING` são o fluxo de pré-lance: durante a janela configurada, o participante registrado pode ofertar por lote; o manager pode iniciar/pausar/retomar e encerrar o leilão pelo engine. `SHOPPING` é apenas a nomenclatura comercial e não substitui os lances por reserva.
+- `TIMED` é o fluxo de pré-lance: durante a janela configurada, o participante registrado pode ofertar por lote. `SHOPPING` é compra imediata: o primeiro participante aprovado que confirmar o preço fixo recebe o lote, que é marcado como vendido na mesma transação.
 - `LIVE` pode receber pré-lances quando `preBidStartsAt`/`preBidEndsAt` forem enviados. Sem essas datas, os lotes ficam consultáveis, mas o lance só é liberado após `start`, quando o estado fica `RUNNING`.
 - Cada origem (`ONLINE`, `PROXY`, `FLOOR`, `PHONE`) exige cadastro aprovado para o participante-alvo. No FLOOR/PHONE o administrador é o ator da operação e o participante cadastrado continua sendo o dono do lance.
 - `LIVE` sempre possui etapa de transmissão após o início; pré-lance é opcional. `TIMED`/`SHOPPING` não dependem de transmissão.

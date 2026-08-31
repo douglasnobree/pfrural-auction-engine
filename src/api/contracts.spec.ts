@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { acquisitionSource, floorBidBody, parseBody, publishExecutionBody, registrationBody, registrationListQuery } from './contracts.js';
+import { acquisitionSource, floorBidBody, parseBody, publishExecutionBody, registrationBody, registrationListQuery, reservationBody } from './contracts.js';
 
 describe('auction API contracts', () => {
   it('keeps floor and phone bids as explicit origins', () => {
@@ -31,6 +31,11 @@ describe('auction API contracts', () => {
   it('validates manager pagination limits and preserves the opaque cursor', () => {
     expect(registrationListQuery.parse({ limit: '20', cursor: 'opaque-cursor' })).toEqual({ limit: 20, cursor: 'opaque-cursor' });
     expect(() => registrationListQuery.parse({ limit: '101' })).toThrow();
+  });
+
+  it('accepts exactly one item for an immediate shopping purchase', () => {
+    expect(reservationBody.parse({ quantity: 1 })).toEqual({ quantity: 1 });
+    expect(() => reservationBody.parse({ quantity: 2 })).toThrow();
   });
 
   it('accepts an optional nullable secondary increment in publication payloads', () => {

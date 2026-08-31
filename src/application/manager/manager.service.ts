@@ -38,7 +38,7 @@ export class ManagerService {
         status: { in: ['SCHEDULED', 'RUNNING', 'PAUSED'] },
         OR: [
           {
-            mode: { in: ['TIMED', 'SHOPPING'] },
+            mode: 'TIMED',
             preBidEnabled: true,
             preBidEndsAt: { lte: now },
           },

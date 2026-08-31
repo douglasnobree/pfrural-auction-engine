@@ -183,8 +183,8 @@ The planning document was not modified.
 
 ### Auction modes and bidding windows
 
-- Added `AuctionMode` to the existing backend CRUD with `TIMED` as the backward-compatible default. The admin form now explicitly selects `Pré-lance / fechamento`, `Ao vivo` or `Shopping / reserva`.
-- `TIMED` and `SHOPPING` accept registered participant bids during their configured pre-bid period and remain bid-capable while running. The lot start time does not incorrectly block a valid scheduled pre-bid. The migration backfills `pre_bid_enabled=true` for existing TIMED and SHOPPING executions.
+- Added `AuctionMode` to the existing backend CRUD with `TIMED` as the backward-compatible default. The admin form now explicitly selects `Pré-lance / fechamento`, `Ao vivo` or `Shopping / compra imediata`.
+- `TIMED` accepts registered participant bids during its configured pre-bid period and remains bid-capable while running. `SHOPPING` is an immediate-purchase mode: the first approved participant to confirm the fixed price sells the lot atomically. The migration backfills `pre_bid_enabled=true` for existing executions for compatibility.
 - `LIVE` accepts pre-bids only when pre-bid dates are configured (`preBidEnabled` is derived from those dates), and accepts real-time bids after the engine transitions to `RUNNING`. Without pre-bid dates, a scheduled LIVE auction stays view-only until the manager starts it.
 - The engine enforces `preBidStartsAt`, `preBidEndsAt` and the LIVE fallback cutoff at `auction.startsAt`, returning explicit `PREBID_NOT_STARTED`, `PREBID_CLOSED` or `AUCTION_NOT_OPEN` errors.
 - CRUD publication sends mode and pre-bid dates to the PostgreSQL engine. CRUD `OPEN`/`CLOSED` changes and automatic lifecycle changes attempt idempotent engine `start`/`finish` commands; engine manager commands continue projecting the authoritative result back to CRUD.
@@ -199,7 +199,7 @@ The planning document was not modified.
 ### Frontend behavior
 
 - Runtime lot controls now use the authoritative mode/window and retain the fixed increment buttons, custom bid and secret proxy ceiling. A bid click while participation is not enabled starts the registration/authentication flow instead of silently disabling the action.
-- LIVE pre-bid/catalog cards are available before the stream; the LIVE stream area is reserved for that mode and uses the mock provider until a real provider is configured. TIMED and SHOPPING use the same lot-level bid flow without a stream.
+- LIVE pre-bid/catalog cards are available before the stream; the LIVE stream area is reserved for that mode and uses the mock provider until a real provider is configured. TIMED uses the lot-level bid flow without a stream; SHOPPING uses the lot-level immediate-purchase flow.
 - Snapshot types expose `preBidEnabled`, `preBidStartsAt` and `preBidEndsAt`; CRUD catalog types expose the auction mode.
 
 ### Validation in this round
@@ -222,7 +222,7 @@ The full frontend lint remains a repository-wide baseline issue outside the auct
 
 ### Correções desta rodada: semântica de formatos e experiência pública
 
-- `SHOPPING` agora é tratado pelo engine como a mesma janela de pré-lance de `TIMED`; a nomenclatura comercial não remove mais os controles de lance. Reserva transacional continua disponível apenas como opção complementar quando o lote possui `fixedPriceCents`.
+- `SHOPPING` agora é tratado pelo engine como compra imediata: o primeiro participante aprovado que confirmar o preço fixo gera um único lance efetivo, vencedor, settlement e evento de venda na mesma transação. O endpoint legado de reserva foi mantido como compatibilidade, mas não cria mais reservas temporárias.
 - `LIVE` permanece o único formato com transmissão. O frontend reserva a área de transmissão para todo leilão LIVE e usa o mock enquanto o provedor real não estiver configurado; `TIMED` e `SHOPPING` não renderizam transmissão.
 - O catálogo público exibe somente lotes `OPEN`/`CLOSING`; lotes pausados continuam ocultos. Lotes `SOLD`/`UNSOLD`/`CANCELLED` são exibidos abaixo, com resultado, valor final e vencedor quando disponível.
 - A página pública de catálogo agora mostra preço atual/próximo lance e direciona ao lote com `Dar lance`. A página individual mantém os botões fixos, valor personalizado, teto automático e cadastro diretamente abaixo do preço, com atualização por snapshot/WebSocket/polling sem F5.
@@ -270,9 +270,9 @@ The placeholder image shown in the test screenshot is independent of bidding: th
 - Added a manager participant tab with pending requests, user identity and one global eligibility switch. The admin can also search any registered user by name, company or email and enable or block that person before any auction-specific request. Reloading does not reset the state because the decision is persisted on the backend user, not in React or Redis.
 - Added idempotent manager registration approval/suspension endpoints and versioned `registration.requested`, `registration.approved` and `registration.suspended` outbox events.
 - Added manager search across registered users by name, company or email. The control room can select an enabled user, an open lot, the `PHONE` or `FLOOR` origin and an amount, then place a bid in that person's name. PostgreSQL records the selected participant as bidder and the authenticated admin as actor; the public leader therefore shows the real user's display name.
-- Split control-room behavior by auction mode. `TIMED`/`SHOPPING` show pre-bid operation and direct idempotent closing without live stream/start controls. Only `LIVE` exposes stream and start/pause/resume operations.
+- Split control-room behavior by auction mode. `TIMED` shows pre-bid operation and `SHOPPING` shows immediate-purchase operation, both with direct idempotent closing without live stream/start controls. Only `LIVE` exposes stream and start/pause/resume operations.
 - Direct finishing from `SCHEDULED` is allowed only for `TIMED`/`SHOPPING`; open lots are closed idempotently first so winners and settlement events are produced before the auction finishes.
-- Publication now opens every `TIMED`/`SHOPPING` lot for pre-bids. `LIVE` keeps the sequential first-open/rest-paused policy. Public pages keep the reference layout: centered catalog, focused lot page, bid controls directly below the official price and stream only while a LIVE execution is actually running.
+- Publication opens every `TIMED` lot for pre-bids and every `SHOPPING` lot for immediate purchase. `LIVE` keeps the sequential first-open/rest-paused policy. Public pages keep the reference layout: centered catalog, focused lot page, bid controls directly below the official price and stream only while a LIVE execution is actually running.
 - Public bid controls now distinguish checking, pending manual validation, globally suspended and approved states with friendly messages, polling/realtime reconciliation and F5 persistence.
 
 ### Validation

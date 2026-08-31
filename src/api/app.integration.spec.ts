@@ -5,6 +5,71 @@ import { createApp } from './app.js';
 const runIntegration = process.env.RUN_INTEGRATION_TESTS === 'true';
 
 describe.skipIf(!runIntegration)('auction engine API integration', () => {
+  it('sells a shopping lot to the first approved buyer and rejects all later buyers', async () => {
+    const { app, context } = await createApp();
+    try {
+      const integrationKey = `integration-shopping-${Date.now().toString(36)}`;
+      const sandbox = await context.sandbox.create({ participantId: 'shopping-owner', lotCount: 1, idempotencyKey: integrationKey }, integrationKey);
+      const auctionId = String((sandbox as { auctionId: string }).auctionId);
+      const auction = await context.database.prisma.auctionExecution.findUniqueOrThrow({ where: { id: auctionId }, include: { lots: true } });
+      const lot = auction.lots[0];
+      if (!lot) throw new Error('Shopping integration lot is missing');
+
+      await context.database.prisma.auctionExecution.update({ where: { id: auction.id }, data: { mode: 'SHOPPING', status: 'RUNNING', preBidEnabled: false } });
+      await context.database.prisma.auctionLotExecution.update({ where: { id: lot.id }, data: { status: 'OPEN', fixedPriceCents: 75000n, quantity: 1, availableQuantity: 1, currentPriceCents: null, currentBidderId: null, currentBidderAlias: null } });
+      for (const userId of ['shopping-owner', 'shopping-second']) {
+        await context.database.prisma.auctionRegistration.upsert({
+          where: { auctionId_userId: { auctionId: auction.id, userId } },
+          create: { auctionId: auction.id, userId, status: 'APPROVED', termsVersion: 'sandbox-v1' },
+          update: { status: 'APPROVED' },
+        });
+      }
+
+      const blocked = await app.inject({
+        method: 'POST',
+        url: `/v1/shopping-lots/${lot.id}/reservations`,
+        headers: { 'x-user-id': 'shopping-pending', 'idempotency-key': `${integrationKey}-blocked` },
+        payload: { quantity: 1 },
+      });
+      expect(blocked.statusCode).toBe(403);
+      expect(blocked.json().error.code).toBe('REGISTRATION_REQUIRED');
+
+      const purchase = {
+        method: 'POST' as const,
+        url: `/v1/shopping-lots/${lot.id}/reservations`,
+        headers: { 'x-user-id': 'shopping-owner', 'idempotency-key': `${integrationKey}-purchase` },
+        payload: { quantity: 1 },
+      };
+      const firstPurchase = await app.inject(purchase);
+      const replayedPurchase = await app.inject(purchase);
+      expect(firstPurchase.statusCode).toBe(200);
+      expect(firstPurchase.json()).toMatchObject({ status: 'ACCEPTED', lotStatus: 'SOLD', sold: true, currentPriceCents: '75000', winningAmountCents: '75000' });
+      expect(replayedPurchase.json()).toMatchObject({ bidRequestId: firstPurchase.json().bidRequestId, lotStatus: 'SOLD', winnerAwardId: firstPurchase.json().winnerAwardId });
+
+      const laterPurchase = await app.inject({
+        method: 'POST',
+        url: `/v1/shopping-lots/${lot.id}/reservations`,
+        headers: { 'x-user-id': 'shopping-second', 'idempotency-key': `${integrationKey}-later` },
+        payload: { quantity: 1 },
+      });
+      expect(laterPurchase.statusCode).toBe(409);
+      expect(laterPurchase.json().error.code).toBe('SHOPPING_ALREADY_SOLD');
+
+      const history = await app.inject({ method: 'GET', url: `/v1/lots/${lot.id}/bids?limit=10` });
+      expect(history.statusCode).toBe(200);
+      expect(history.json().items).toHaveLength(1);
+      expect(history.json().items[0]).toMatchObject({ amountCents: '75000' });
+      const snapshot = await app.inject({ method: 'GET', url: `/v1/auctions/${auction.id}/snapshot` });
+      expect(snapshot.json().lots[0]).toMatchObject({ status: 'SOLD', currentPriceCents: '75000', availableQuantity: 0, winningAmountCents: '75000' });
+    } finally {
+      context.realtime.close();
+      await app.close();
+      await context.rabbit.close();
+      await context.redis.close();
+      await context.database.close();
+    }
+  });
+
   it('accepts online pre-bids automatically and keeps legacy approval disabled', async () => {
     const { app, context } = await createApp();
     try {
