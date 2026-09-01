@@ -150,12 +150,11 @@ export class BiddingService {
     return this.database.transaction(async (client) => {
       const lot = await this.lockLot(client, input.lotId);
       const phase = this.phaseFor(lot);
-      const fixedPriceCents = lot.fixedPriceCents;
 
       if (lot.auction.mode !== 'SHOPPING') throw new DomainError('WRONG_AUCTION_MODE', 'This lot is not an immediate-purchase lot', 422);
+      const fixedPriceCents = lot.fixedPriceCents ?? lot.startingBidCents;
       if (!['SCHEDULED', 'RUNNING'].includes(lot.auction.status)) throw new DomainError('AUCTION_NOT_OPEN', 'This shopping auction is not available', 409);
       if (lot.status !== 'OPEN') throw new DomainError('SHOPPING_ALREADY_SOLD', 'This shopping lot is no longer available', 409);
-      if (fixedPriceCents === null) throw new DomainError('FIXED_PRICE_REQUIRED', 'Shopping lot has no fixed price', 422);
       if (lot.availableQuantity < 1) throw new DomainError('SHOPPING_ALREADY_SOLD', 'This shopping lot is no longer available', 409);
       if (lot.currentBidderId !== null || lot.currentPriceCents !== null) throw new DomainError('SHOPPING_ALREADY_SOLD', 'This shopping lot is no longer available', 409);
 

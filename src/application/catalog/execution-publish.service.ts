@@ -73,6 +73,14 @@ export class ExecutionPublishService {
           update: {
             title: inputLot.title,
             lotNumber: inputLot.lotNumber,
+            ...(inputLot.fixedPriceCents !== undefined
+              ? {
+                  fixedPriceCents:
+                    inputLot.fixedPriceCents === null
+                      ? null
+                      : BigInt(inputLot.fixedPriceCents),
+                }
+              : {}),
             ...(inputLot.secondaryIncrementCents !== undefined
               ? {
                   secondaryIncrementCents:

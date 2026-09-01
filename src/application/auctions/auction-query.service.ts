@@ -30,6 +30,10 @@ function currentBidderAlias(auctionId: string, lot: BidderProjection, name: stri
     : null;
 }
 
+function shoppingPriceCents(lot: { fixedPriceCents: bigint | null; startingBidCents: bigint }, mode: string): bigint | null {
+  return lot.fixedPriceCents ?? (mode === 'SHOPPING' ? lot.startingBidCents : null);
+}
+
 function normalizePublicEventPayload(payload: Record<string, unknown>): Record<string, unknown> {
   const normalized = { ...payload };
   const name = readableParticipantName(
@@ -73,19 +77,17 @@ export class AuctionQueryService {
         version: asBigInt(stream.version).toString(),
         updatedAt: stream.updatedAt.toISOString(),
       } : null,
-      lots: auction.lots.map((lot) => ({
-        ...(() => {
-          const name = currentBidderName(lot);
-          return {
-            currentBidderAlias: currentBidderAlias(auction.id, lot, name),
-            currentBidderName: name,
-            winnerName: lot.winnerAward ? name : null,
-          };
-        })(),
+      lots: auction.lots.map((lot) => {
+        const fixedPriceCents = shoppingPriceCents(lot, auction.mode);
+        const name = currentBidderName(lot);
+        return {
+          currentBidderAlias: currentBidderAlias(auction.id, lot, name),
+          currentBidderName: name,
+          winnerName: lot.winnerAward ? name : null,
         id: lot.id, externalId: lot.externalLotId, lotNumber: lot.lotNumber, title: lot.title, status: lot.status,
         startingBidCents: asBigInt(lot.startingBidCents).toString(), incrementCents: asBigInt(lot.incrementCents).toString(), secondaryIncrementCents: lot.secondaryIncrementCents == null ? null : asBigInt(lot.secondaryIncrementCents).toString(),
         currentIncrementCents: activeIncrementCents({ incrementCents: asBigInt(lot.incrementCents), secondaryIncrementCents: lot.secondaryIncrementCents == null ? null : asBigInt(lot.secondaryIncrementCents), nextIncrementIsSecondary: lot.nextIncrementIsSecondary }).toString(),
-        fixedPriceCents: lot.fixedPriceCents === null ? null : asBigInt(lot.fixedPriceCents).toString(),
+        fixedPriceCents: fixedPriceCents === null ? null : fixedPriceCents.toString(),
         quantity: lot.quantity, availableQuantity: lot.availableQuantity,
         startsAt: asDate(lot.startsAt)?.toISOString() ?? null, endsAt: asDate(lot.endsAt)?.toISOString() ?? null,
         currentPriceCents: centsToJson(lot.currentPriceCents === null ? null : asBigInt(lot.currentPriceCents)),
@@ -93,7 +95,8 @@ export class AuctionQueryService {
         winningAmountCents: lot.winnerAward ? lot.winnerAward.winningAmountCents.toString() : null,
         closedAt: ['SOLD', 'UNSOLD', 'CANCELLED'].includes(lot.status) ? lot.updatedAt.toISOString() : null,
         lotSequence: asBigInt(lot.lotSequence).toString(), version: asBigInt(lot.version).toString(),
-      })),
+        };
+      }),
     };
   }
 

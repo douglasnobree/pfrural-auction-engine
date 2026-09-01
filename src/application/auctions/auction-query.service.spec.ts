@@ -3,7 +3,7 @@ import type { Database } from '../../infrastructure/database/db.js';
 import { AuctionQueryService } from './auction-query.service.js';
 
 describe('public auction query', () => {
-  it('returns the latest participant display name instead of the generated alias', async () => {
+  it('returns the latest participant display name and Shopping price fallback', async () => {
     const auction = {
       id: '11111111-1111-4111-8111-111111111111',
       externalAuctionId: 'external-auction',
@@ -62,5 +62,11 @@ describe('public auction query', () => {
     expect(lot.secondaryIncrementCents).toBe('25');
     expect(lot.currentIncrementCents).toBe('25');
     expect(lot.nextBidCents).toBe('145');
+
+    auction.mode = 'SHOPPING';
+    const shoppingSnapshot = await new AuctionQueryService(database).getAuctionSnapshot(auction.id);
+    const shoppingLot = (shoppingSnapshot.lots as Array<Record<string, unknown>>)[0]!;
+
+    expect(shoppingLot.fixedPriceCents).toBe('100');
   });
 });
