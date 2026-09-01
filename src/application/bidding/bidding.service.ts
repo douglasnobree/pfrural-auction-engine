@@ -379,8 +379,13 @@ export class BiddingService {
       let winnerName: string | null = null;
       if (sold && lot.currentPriceCents !== null) {
         const latest = await client.effectiveBid.findFirst({ where: { lotId: lot.id, voidedAt: null }, orderBy: { lotSequence: 'desc' }, include: { bidIntent: { select: { displayName: true } } } });
+        const winnerIntent = winner
+          ? await client.bidIntent.findFirst({ where: { lotId: lot.id, userId: winner }, orderBy: { intentSequence: 'desc' }, select: { displayName: true } })
+          : null;
         winnerName = winner
-          ? readableParticipantName(latest?.bidIntent.displayName) ?? readableParticipantName(lot.currentBidderAlias)
+          ? readableParticipantName(winnerIntent?.displayName)
+            ?? (latest?.userId === winner ? readableParticipantName(latest.bidIntent.displayName) : null)
+            ?? readableParticipantName(lot.currentBidderAlias)
           : null;
         const award = await client.winnerAward.upsert({
           where: { lotId: lot.id },
@@ -424,6 +429,15 @@ export class BiddingService {
       take: limit + 1,
     });
     const hasMore = rows.length > limit;
+    const participantIds = [...new Set(rows.map((row) => row.userId))];
+    const participantIntents = participantIds.length > 0
+      ? await this.database.prisma.bidIntent.findMany({ where: { lotId, userId: { in: participantIds } }, select: { userId: true, displayName: true }, orderBy: { intentSequence: 'desc' } })
+      : [];
+    const displayNames = new Map<string, string>();
+    for (const intent of participantIntents) {
+      const name = readableParticipantName(intent.displayName);
+      if (name && !displayNames.has(intent.userId)) displayNames.set(intent.userId, name);
+    }
     const canManage = Boolean(lot && ['OPEN', 'PAUSED', 'CLOSING'].includes(lot.status) && !lot.winnerAward);
     const items = rows.slice(0, limit).map((row) => ({
       id: row.id,
@@ -434,7 +448,7 @@ export class BiddingService {
       lotSequence: row.lotSequence.toString(),
       acceptedAt: row.bidIntent.approvedAt?.toISOString() ?? row.createdAt.toISOString(),
       createdAt: row.createdAt.toISOString(),
-      bidderAlias: participantAlias(row.lot.auctionId, row.userId, row.bidIntent.displayName),
+      bidderAlias: participantAlias(row.lot.auctionId, row.userId, displayNames.get(row.userId) ?? row.bidIntent.displayName),
       ...(includeVoided ? { participantId: row.userId } : {}),
       status: row.voidedAt ? 'VOIDED' as const : 'ACTIVE' as const,
       ...(includeVoided && row.voidedAt ? { voidedAt: row.voidedAt.toISOString(), ...(row.voidReason ? { voidReason: row.voidReason } : {}) } : {}),

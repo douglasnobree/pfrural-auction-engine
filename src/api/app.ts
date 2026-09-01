@@ -117,7 +117,7 @@ export async function createApp(context = createContext()): Promise<{ app: Fasti
     const actor = actorFromRequest(request); const body = z.object({ auctionId: z.string().uuid() }).parse(request.body); await context.redis.markPresence(body.auctionId, actor.userId); return context.tickets.issue(body.auctionId, actor.userId, actor.roles);
   });
   app.post('/v1/shopping-lots/:lotId/reservations', async (request) => {
-    const actor = actorFromRequest(request); const { lotId } = lotParam.parse(request.params); const body = parseBody(reservationBody, request.body); return context.shopping.reserve(lotId, actor.userId, body.quantity, idempotencyKey(request), correlationId(request));
+    const actor = actorFromRequest(request); const { lotId } = lotParam.parse(request.params); const body = parseBody(reservationBody, request.body); return context.shopping.reserve(lotId, actor.userId, body.quantity, idempotencyKey(request), correlationId(request), trustedDisplayName(request, body.displayName));
   });
 
   app.post('/v1/manager/auctions/:id/:action', async (request) => {

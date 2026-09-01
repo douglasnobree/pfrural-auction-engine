@@ -8,20 +8,46 @@ import { activeIncrementCents, nextBidCents } from '../../domain/bid-increment.j
 type BidderProjection = {
   currentBidderId: string | null;
   currentBidderAlias: string | null;
+  bidIntents?: Array<{
+    userId: string;
+    displayName: string | null;
+  }>;
   effectiveBids?: Array<{
     userId: string;
     bidIntent: { displayName: string | null };
   }>;
+  winnerAward?: {
+    winnerUserId: string;
+  } | null;
+};
+
+function participantName(lot: BidderProjection, userId: string | null): string | null {
+  if (!userId) return null;
+  for (const intent of lot.bidIntents ?? []) {
+    if (intent.userId !== userId) continue;
+    const name = readableParticipantName(intent.displayName);
+    if (name) return name;
+  }
+  return null;
 }
 
 function currentBidderName(lot: BidderProjection): string | null {
   const latestBid = lot.effectiveBids?.[0];
+  const name = participantName(lot, lot.currentBidderId);
+  if (name) return name;
+
   if (latestBid?.userId === lot.currentBidderId) {
     const latestName = readableParticipantName(latestBid.bidIntent.displayName);
     if (latestName) return latestName;
   }
 
   return readableParticipantName(lot.currentBidderAlias);
+}
+
+function winnerName(lot: BidderProjection, currentName: string | null): string | null {
+  if (!lot.winnerAward) return null;
+  return participantName(lot, lot.winnerAward.winnerUserId)
+    ?? (lot.winnerAward.winnerUserId === lot.currentBidderId ? currentName : null);
 }
 
 function currentBidderAlias(auctionId: string, lot: BidderProjection, name: string | null): string | null {
@@ -55,7 +81,7 @@ export class AuctionQueryService {
   constructor(private readonly database: Database) {}
 
   async getAuctionSnapshot(auctionId: string): Promise<Record<string, unknown>> {
-    const auction = await this.database.prisma.auctionExecution.findUnique({ where: { id: auctionId }, include: { lots: { orderBy: { lotNumber: 'asc' }, include: { winnerAward: true, effectiveBids: { where: { voidedAt: null }, orderBy: { lotSequence: 'desc' }, take: 1, include: { bidIntent: { select: { displayName: true } } } } } } } });
+    const auction = await this.database.prisma.auctionExecution.findUnique({ where: { id: auctionId }, include: { lots: { orderBy: { lotNumber: 'asc' }, include: { winnerAward: true, bidIntents: { select: { userId: true, displayName: true }, orderBy: { intentSequence: 'desc' } }, effectiveBids: { where: { voidedAt: null }, orderBy: { lotSequence: 'desc' }, take: 1, include: { bidIntent: { select: { displayName: true } } } } } } } });
     if (!auction) throw new DomainError('AUCTION_NOT_FOUND', 'Auction not found', 404);
     const stream = await this.database.prisma.streamSession.findFirst({ where: { auctionId }, orderBy: { createdAt: 'desc' } });
     const serverTime = new Date().toISOString();
@@ -83,8 +109,8 @@ export class AuctionQueryService {
         return {
           currentBidderAlias: currentBidderAlias(auction.id, lot, name),
           currentBidderName: name,
-          winnerName: lot.winnerAward ? name : null,
-        id: lot.id, externalId: lot.externalLotId, lotNumber: lot.lotNumber, title: lot.title, status: lot.status,
+          winnerName: winnerName(lot, name),
+          id: lot.id, externalId: lot.externalLotId, lotNumber: lot.lotNumber, title: lot.title, status: lot.status,
         startingBidCents: asBigInt(lot.startingBidCents).toString(), incrementCents: asBigInt(lot.incrementCents).toString(), secondaryIncrementCents: lot.secondaryIncrementCents == null ? null : asBigInt(lot.secondaryIncrementCents).toString(),
         currentIncrementCents: activeIncrementCents({ incrementCents: asBigInt(lot.incrementCents), secondaryIncrementCents: lot.secondaryIncrementCents == null ? null : asBigInt(lot.secondaryIncrementCents), nextIncrementIsSecondary: lot.nextIncrementIsSecondary }).toString(),
         fixedPriceCents: fixedPriceCents === null ? null : fixedPriceCents.toString(),
@@ -107,15 +133,15 @@ export class AuctionQueryService {
   }
 
   async getLotByExternalId(externalAuctionId: string, externalLotId: string): Promise<{ id: string; auctionId: string; mode: string; status: string; currentPriceCents: string | null; currentBidderAlias: string | null; currentBidderName: string | null; winnerName: string | null; winningAmountCents: string | null; lotSequence: string; version: string; endsAt: string | null }> {
-    const lot = await this.database.prisma.auctionLotExecution.findFirst({ where: { externalLotId, auction: { externalAuctionId } }, include: { auction: true, winnerAward: true, effectiveBids: { where: { voidedAt: null }, orderBy: { lotSequence: 'desc' }, take: 1, include: { bidIntent: { select: { displayName: true } } } } } });
+    const lot = await this.database.prisma.auctionLotExecution.findFirst({ where: { externalLotId, auction: { externalAuctionId } }, include: { auction: true, winnerAward: true, bidIntents: { select: { userId: true, displayName: true }, orderBy: { intentSequence: 'desc' } }, effectiveBids: { where: { voidedAt: null }, orderBy: { lotSequence: 'desc' }, take: 1, include: { bidIntent: { select: { displayName: true } } } } } });
     if (!lot) throw new DomainError('LOT_NOT_FOUND', 'Lot not found', 404);
     const name = currentBidderName(lot);
     const bidderAlias = currentBidderAlias(lot.auctionId, lot, name);
-    return { id: lot.id, auctionId: lot.auctionId, mode: lot.auction.mode, status: lot.status, currentPriceCents: lot.currentPriceCents?.toString() ?? null, currentBidderAlias: bidderAlias, currentBidderName: name, winnerName: lot.winnerAward ? name : null, winningAmountCents: lot.winnerAward?.winningAmountCents.toString() ?? null, lotSequence: lot.lotSequence.toString(), version: lot.version.toString(), endsAt: lot.endsAt?.toISOString() ?? null };
+    return { id: lot.id, auctionId: lot.auctionId, mode: lot.auction.mode, status: lot.status, currentPriceCents: lot.currentPriceCents?.toString() ?? null, currentBidderAlias: bidderAlias, currentBidderName: name, winnerName: winnerName(lot, name), winningAmountCents: lot.winnerAward?.winningAmountCents.toString() ?? null, lotSequence: lot.lotSequence.toString(), version: lot.version.toString(), endsAt: lot.endsAt?.toISOString() ?? null };
   }
 
   async getLot(lotId: string): Promise<{ id: string; auctionId: string; mode: string; status: string; currentPriceCents: string | null; currentBidderAlias: string | null; currentBidderName: string | null; winnerName: string | null; winningAmountCents: string | null; lotSequence: string; version: string; endsAt: string | null }> {
-    const lot = await this.database.prisma.auctionLotExecution.findUnique({ where: { id: lotId }, include: { auction: true, winnerAward: true, effectiveBids: { where: { voidedAt: null }, orderBy: { lotSequence: 'desc' }, take: 1, include: { bidIntent: { select: { displayName: true } } } } } });
+    const lot = await this.database.prisma.auctionLotExecution.findUnique({ where: { id: lotId }, include: { auction: true, winnerAward: true, bidIntents: { select: { userId: true, displayName: true }, orderBy: { intentSequence: 'desc' } }, effectiveBids: { where: { voidedAt: null }, orderBy: { lotSequence: 'desc' }, take: 1, include: { bidIntent: { select: { displayName: true } } } } } });
     if (!lot) throw new DomainError('LOT_NOT_FOUND', 'Lot not found', 404);
     const name = currentBidderName(lot);
     return {
@@ -123,7 +149,7 @@ export class AuctionQueryService {
       currentPriceCents: lot.currentPriceCents === null ? null : asBigInt(lot.currentPriceCents).toString(),
       currentBidderAlias: currentBidderAlias(lot.auctionId, lot, name), lotSequence: asBigInt(lot.lotSequence).toString(), version: asBigInt(lot.version).toString(),
       currentBidderName: name,
-      winnerName: lot.winnerAward ? name : null,
+      winnerName: winnerName(lot, name),
       winningAmountCents: lot.winnerAward?.winningAmountCents.toString() ?? null,
       endsAt: lot.endsAt?.toISOString() ?? null,
     };
