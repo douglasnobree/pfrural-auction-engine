@@ -11,6 +11,7 @@ import { assertBiddingWindow, isPreBidWindow } from '../../domain/bidding-window
 import { BID_APPROVAL_FEATURE_ENABLED, requiresManagerApproval } from '../../domain/bid-approval.js';
 import { activeIncrementCents, advanceIncrementState, nextBidCents as calculateNextBidCents, openingBidCents } from '../../domain/bid-increment.js';
 import type { AcquisitionSource, BidOrigin, BidPhase, ProxyEntry } from '../../domain/types.js';
+import { WHATSAPP_CONSENT_VERSION } from '../registrations/registration.service.js';
 
 export interface PlaceBidInput {
   lotId: string;
@@ -25,6 +26,7 @@ export interface PlaceBidInput {
   displayName?: string;
   autoApproveRegistration?: boolean;
   acquisitionSource?: AcquisitionSource;
+  whatsappOptIn?: boolean;
 }
 
 export interface BuyShoppingLotInput {
@@ -153,14 +155,6 @@ export class BiddingService {
 
       if (lot.auction.mode !== 'SHOPPING') throw new DomainError('WRONG_AUCTION_MODE', 'This lot is not an immediate-purchase lot', 422);
       const fixedPriceCents = lot.fixedPriceCents ?? lot.startingBidCents;
-      if (!['SCHEDULED', 'RUNNING'].includes(lot.auction.status)) throw new DomainError('AUCTION_NOT_OPEN', 'This shopping auction is not available', 409);
-      if (lot.status !== 'OPEN') throw new DomainError('SHOPPING_ALREADY_SOLD', 'This shopping lot is no longer available', 409);
-      if (lot.availableQuantity < 1) throw new DomainError('SHOPPING_ALREADY_SOLD', 'This shopping lot is no longer available', 409);
-      if (lot.currentBidderId !== null || lot.currentPriceCents !== null) throw new DomainError('SHOPPING_ALREADY_SOLD', 'This shopping lot is no longer available', 409);
-
-      const registration = await client.auctionRegistration.findUnique({ where: { auctionId_userId: { auctionId: lot.auctionId, userId: input.userId } } });
-      if (registration?.status !== 'APPROVED') throw new DomainError('REGISTRATION_REQUIRED', 'Participant must be approved before purchasing', 403);
-
       const purchaseInput: PlaceBidInput = { ...input, amountCents: fixedPriceCents.toString(), origin: 'ONLINE' };
       const request = await this.findOrCreateRequest(client, purchaseInput, fixedPriceCents, 'ONLINE', phase);
       if (request.existing) {
@@ -169,6 +163,14 @@ export class BiddingService {
         if (previous) return previous;
         throw new DomainError('COMMAND_IN_PROGRESS', 'The purchase is already being processed', 409);
       }
+
+      if (!['SCHEDULED', 'RUNNING'].includes(lot.auction.status)) throw new DomainError('AUCTION_NOT_OPEN', 'This shopping auction is not available', 409);
+      if (lot.status !== 'OPEN') throw new DomainError('SHOPPING_ALREADY_SOLD', 'This shopping lot is no longer available', 409);
+      if (lot.availableQuantity < 1) throw new DomainError('SHOPPING_ALREADY_SOLD', 'This shopping lot is no longer available', 409);
+      if (lot.currentBidderId !== null || lot.currentPriceCents !== null) throw new DomainError('SHOPPING_ALREADY_SOLD', 'This shopping lot is no longer available', 409);
+
+      const registration = await client.auctionRegistration.findUnique({ where: { auctionId_userId: { auctionId: lot.auctionId, userId: input.userId } } });
+      if (registration?.status !== 'APPROVED') throw new DomainError('REGISTRATION_REQUIRED', 'Participant must be approved before purchasing', 403);
 
       const bid = await this.acceptRequestLocked(client, lot, request.row.id, fixedPriceCents, 'ONLINE', phase, purchaseInput, undefined);
       const closedAt = new Date();
@@ -229,6 +231,10 @@ export class BiddingService {
         eventType: 'winner.declared', routingKey: 'winner.declared', aggregateType: 'winner_award', aggregateId: award.id,
         auctionId: lot.auctionId, lotId: lot.id, correlationId: input.correlationId, causationId: request.row.id, actorId: input.actorId,
         payload: { lotId: lot.id, externalLotId: lot.externalLotId, awardId: award.id, settlementId: settlement.id, winnerName, winningAmountCents: fixedPriceCents.toString() }, writeEventLog: false,
+      });
+      await this.appendParticipantNotification(client, lot, {
+        type: 'LOT_WON', participantId: input.userId, winningAmountCents: fixedPriceCents, phase,
+        occurredAt: closedAt, correlationId: input.correlationId, causationId: request.row.id, actorId: input.actorId,
       });
       return result;
     });
@@ -414,6 +420,10 @@ export class BiddingService {
       if (sold && awardId) await appendDomainEvent(client, {
         eventType: 'winner.declared', routingKey: 'winner.declared', aggregateType: 'winner_award', aggregateId: awardId,
         auctionId: lot.auctionId, lotId: lot.id, correlationId, actorId, payload: { lotId: lot.id, externalLotId: lot.externalLotId, awardId, settlementId, winnerName, winningAmountCents: lot.currentPriceCents?.toString() ?? null }, writeEventLog: false,
+      });
+      if (sold && winner && lot.currentPriceCents !== null) await this.appendParticipantNotification(client, lot, {
+        type: 'LOT_WON', participantId: winner, winningAmountCents: lot.currentPriceCents,
+        occurredAt: new Date(), correlationId, causationId: awardId ?? `lot-close:${lot.id}`, actorId,
       });
       return payload;
     });
@@ -816,8 +826,18 @@ export class BiddingService {
     }
 
     const registration = existing
-      ? await client.auctionRegistration.update({ where: { id: existing.id }, data: { status: 'APPROVED' } })
-      : await client.auctionRegistration.create({ data: { auctionId: lot.auctionId, userId: input.userId, status: 'APPROVED', termsVersion: lot.auction.regulationVersion, acquisitionSource: acquisitionSource as PrismaAcquisitionSource } });
+      ? await client.auctionRegistration.update({ where: { id: existing.id }, data: { status: 'APPROVED', ...(input.whatsappOptIn !== undefined ? {
+          whatsappOptIn: input.whatsappOptIn,
+          whatsappConsentAt: input.whatsappOptIn ? new Date() : null,
+          whatsappConsentVersion: input.whatsappOptIn ? WHATSAPP_CONSENT_VERSION : null,
+        } : {}) } })
+      : await client.auctionRegistration.create({ data: {
+          auctionId: lot.auctionId, userId: input.userId, status: 'APPROVED', termsVersion: lot.auction.regulationVersion,
+          acquisitionSource: acquisitionSource as PrismaAcquisitionSource,
+          whatsappOptIn: input.whatsappOptIn ?? false,
+          whatsappConsentAt: input.whatsappOptIn ? new Date() : null,
+          whatsappConsentVersion: input.whatsappOptIn ? WHATSAPP_CONSENT_VERSION : null,
+        } });
 
     await appendDomainEvent(client, {
       eventType: 'registration.approved',
@@ -837,6 +857,10 @@ export class BiddingService {
         source: 'manager-floor-bid',
       },
       writeEventLog: false,
+    });
+    await this.appendParticipantNotification(client, lot, {
+      type: 'PARTICIPATION_APPROVED', participantId: input.userId, occurredAt: new Date(),
+      correlationId: input.correlationId, causationId: input.idempotencyKey, actorId: input.actorId,
     });
   }
 
@@ -920,7 +944,56 @@ export class BiddingService {
       correlationId: input.correlationId, causationId: bidRequestId, actorId: approvalActorId ?? input.actorId,
       payload: { bidRequestId, lotId: lot.id, externalLotId: lot.externalLotId, lotSequence: nextSequence.toString(), version: newVersion.toString(), currentPriceCents: effectivePriceCents.toString(), currentIncrementCents: nextIncrement.toString(), nextBidCents: (effectivePriceCents + nextIncrement).toString(), currentBidderAlias: publicBidderAlias, currentBidderName: evaluation.leader.displayName ?? null, bidOrigin: evaluation.leader.origin, phase, acceptedAt: acceptedAt.toISOString(), endsAt: endsAt?.toISOString() ?? null, timerExtended, serverTime: result.serverTime },
     });
+    const requesterStillLeads = evaluation.leader.userId === input.userId;
+    await this.appendParticipantNotification(client, lot, {
+      type: requesterStillLeads ? 'BID_ACCEPTED' : 'BID_ACCEPTED_OUTBID',
+      participantId: input.userId,
+      ...(origin !== 'PROXY' ? { offeredAmountCents: amountCents } : {}),
+      currentAmountCents: effectivePriceCents,
+      origin,
+      phase,
+      occurredAt: acceptedAt,
+      correlationId: input.correlationId,
+      causationId: bidRequestId,
+      actorId: approvalActorId ?? input.actorId,
+    });
+    if (leaderChanged && lot.currentBidderId && lot.currentBidderId !== input.userId && lot.currentBidderId !== evaluation.leader.userId) {
+      await this.appendParticipantNotification(client, lot, {
+        type: 'OUTBID', participantId: lot.currentBidderId, currentAmountCents: effectivePriceCents, origin: evaluation.leader.origin as BidOrigin,
+        phase, occurredAt: acceptedAt, correlationId: input.correlationId, causationId: bidRequestId, actorId: approvalActorId ?? input.actorId,
+      });
+    }
+    if (!requesterStillLeads && evaluation.leader.origin === 'PROXY') {
+      await this.appendParticipantNotification(client, lot, {
+        type: 'AUTOMATIC_BID_APPLIED', participantId: evaluation.leader.userId, currentAmountCents: effectivePriceCents, origin: 'PROXY',
+        phase, occurredAt: acceptedAt, correlationId: input.correlationId, causationId: bidRequestId, actorId: approvalActorId ?? input.actorId,
+      });
+    }
     return result;
+  }
+
+  private async appendParticipantNotification(client: PrismaTransaction, lot: LockedLot, input: {
+    type: 'PARTICIPATION_APPROVED' | 'BID_ACCEPTED' | 'BID_ACCEPTED_OUTBID' | 'OUTBID' | 'AUTOMATIC_BID_APPLIED' | 'LOT_WON';
+    participantId: string; offeredAmountCents?: bigint; currentAmountCents?: bigint; winningAmountCents?: bigint;
+    origin?: BidOrigin; phase?: BidPhase; occurredAt: Date; correlationId: string; causationId: string; actorId?: string;
+  }) {
+    await appendDomainEvent(client, {
+      eventType: 'participant.notification.requested', routingKey: 'participant.notification.requested', aggregateType: 'auction_lot_execution', aggregateId: lot.id,
+      auctionId: lot.auctionId, lotId: lot.id, correlationId: input.correlationId, causationId: input.causationId, actorId: input.actorId,
+      payload: {
+        type: input.type,
+        participantId: input.participantId,
+        externalAuctionId: lot.auction.externalAuctionId,
+        externalLotId: lot.externalLotId,
+        ...(input.offeredAmountCents !== undefined ? { offeredAmountCents: input.offeredAmountCents.toString() } : {}),
+        ...(input.currentAmountCents !== undefined ? { currentAmountCents: input.currentAmountCents.toString() } : {}),
+        ...(input.winningAmountCents !== undefined ? { winningAmountCents: input.winningAmountCents.toString() } : {}),
+        ...(input.origin ? { origin: input.origin } : {}),
+        ...(input.phase ? { phase: input.phase } : {}),
+        occurredAt: input.occurredAt.toISOString(),
+      },
+      writeEventLog: false,
+    });
   }
 
   private pendingResult(requestId: string, lot: LockedLot, phase: BidPhase, receivedAt: string): BidCommandResult {

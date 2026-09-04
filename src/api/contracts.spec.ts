@@ -9,7 +9,7 @@ describe('auction API contracts', () => {
 
   it('validates acquisition sources independently from bid origins', () => {
     expect(acquisitionSource.parse('WHATSAPP')).toBe('WHATSAPP');
-    expect(parseBody(registrationBody, { termsVersion: 'v1', acquisitionSource: 'FACEBOOK' })).toEqual({ termsVersion: 'v1', acquisitionSource: 'FACEBOOK' });
+    expect(parseBody(registrationBody, { termsVersion: 'v1', acquisitionSource: 'FACEBOOK' })).toEqual({ termsVersion: 'v1', acquisitionSource: 'FACEBOOK', whatsappOptIn: false });
     expect(() => parseBody(registrationBody, { termsVersion: 'v1', acquisitionSource: 'PHONE' })).toThrow();
     expect(parseBody(floorBidBody, { participantId: 'user-floor', amountCents: '12500', origin: 'FLOOR', acquisitionSource: 'REFERRAL' }).acquisitionSource).toBe('REFERRAL');
   });

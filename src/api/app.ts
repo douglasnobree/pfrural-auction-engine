@@ -4,7 +4,7 @@ import { z, ZodError } from 'zod';
 import { config } from '../config.js';
 import { DomainError } from '../domain/errors.js';
 import { actorFromRequest, correlationId, idempotencyKey, internalRequest, managerFromRequest, trustedDisplayName } from './auth.js';
-import { auctionParam, bidBody, bidHistoryQuery, bidManagementDeleteBody, bidManagementUpdateBody, currentLotBody, externalLotQuery, floorBidBody, idParam, internalRegistrationBody, lotParam, managerBody, parseBody, pendingBidsQuery, publishExecutionBody, proxyBidBody, rejectBody, registrationApprovalBody, registrationBody, registrationListQuery, reservationBody, sandboxBody, streamBody } from './contracts.js';
+import { auctionParam, bidBody, bidHistoryQuery, bidManagementDeleteBody, bidManagementUpdateBody, currentLotBody, externalLotQuery, floorBidBody, idParam, internalRegistrationBody, lotParam, managerBody, parseBody, pendingBidsQuery, publishExecutionBody, proxyBidBody, rejectBody, registrationApprovalBody, registrationBody, registrationListQuery, reservationBody, sandboxBody, streamBody, whatsappConsentBody } from './contracts.js';
 import { AuctionQueryService } from '../application/auctions/auction-query.service.js';
 import { BiddingService } from '../application/bidding/bidding.service.js';
 import { ManagerService } from '../application/manager/manager.service.js';
@@ -18,6 +18,7 @@ import { RealtimeGateway } from '../infrastructure/realtime/gateway.js';
 import { RabbitMq } from '../infrastructure/messaging/rabbitmq.js';
 import { RedisService } from '../infrastructure/redis/redis.service.js';
 import { SandboxService } from '../application/sandbox/sandbox.service.js';
+import { isPublicRealtimeEvent } from '../domain/public-events.js';
 
 export interface AppContext {
   database: Database;
@@ -52,7 +53,9 @@ export async function createApp(context = createContext()): Promise<{ app: Fasti
   await app.register(cors, { origin: true });
   context.realtime = new RealtimeGateway(context.tickets, context.queries, context.hub);
   context.realtime.attach(app.server);
-  void context.rabbit.consume('auction.websocket.v1', async (envelope) => context.hub.broadcast(envelope)).catch((error: unknown) => app.log.warn({ error }, 'RabbitMQ websocket consumer unavailable'));
+  void context.rabbit.consume('auction.websocket.v1', async (envelope) => {
+    if (isPublicRealtimeEvent(envelope.eventType)) context.hub.broadcast(envelope);
+  }).catch((error: unknown) => app.log.warn({ error }, 'RabbitMQ websocket consumer unavailable'));
 
   app.addHook('onRequest', async (request, reply) => {
     const pathname = request.url.split('?')[0] ?? '';
@@ -81,10 +84,14 @@ export async function createApp(context = createContext()): Promise<{ app: Fasti
   app.get('/v1/internal/lots/by-external/:externalLotId', async (request) => { internalRequest(request); const params = z.object({ externalLotId: z.string().min(1) }).parse(request.params); return context.queries.getLotByExternalId(externalLotQuery.parse(request.query).externalAuctionId, params.externalLotId); });
   app.post('/v1/internal/executions/publish', async (request) => { internalRequest(request); return context.executions.publish(parseBody(publishExecutionBody, request.body), correlationId(request)); });
   app.post('/v1/internal/sandbox/auctions', async (request) => { internalRequest(request); if (!config.SANDBOX_ENABLED || config.NODE_ENV === 'production') throw new DomainError('SANDBOX_DISABLED', 'Sandbox creation is disabled in this environment', 403); const body = parseBody(sandboxBody, request.body); return context.sandbox.create({ ...body, idempotencyKey: idempotencyKey(request) }, correlationId(request)); });
-  app.post('/v1/internal/auctions/by-external/:externalAuctionId/registrations', async (request) => { internalRequest(request); const actor = actorFromRequest(request); const { externalAuctionId } = request.params as { externalAuctionId: string }; const body = parseBody(internalRegistrationBody, request.body); const snapshot = await context.queries.getAuctionSnapshotByExternalId(externalAuctionId); const auctionId = (snapshot.auction as { id: string }).id; return context.registrations.register(auctionId, actor.userId, body.termsVersion, idempotencyKey(request), correlationId(request), body.globallyEnabled, body.acquisitionSource); });
+  app.post('/v1/internal/auctions/by-external/:externalAuctionId/registrations', async (request) => { internalRequest(request); const actor = actorFromRequest(request); const { externalAuctionId } = request.params as { externalAuctionId: string }; const body = parseBody(internalRegistrationBody, request.body); const snapshot = await context.queries.getAuctionSnapshotByExternalId(externalAuctionId); const auctionId = (snapshot.auction as { id: string }).id; return context.registrations.register(auctionId, actor.userId, body.termsVersion, idempotencyKey(request), correlationId(request), body.globallyEnabled, body.acquisitionSource, body.whatsappOptIn); });
   app.post('/v1/auctions/:auctionId/registrations', async (request) => {
     const actor = actorFromRequest(request); const { auctionId } = auctionParam.parse(request.params); const body = parseBody(registrationBody, request.body);
-    return context.registrations.register(auctionId, actor.userId, body.termsVersion, idempotencyKey(request), correlationId(request), false, body.acquisitionSource);
+    return context.registrations.register(auctionId, actor.userId, body.termsVersion, idempotencyKey(request), correlationId(request), false, body.acquisitionSource, body.whatsappOptIn);
+  });
+  app.put('/v1/auctions/:auctionId/registrations/whatsapp-consent', async (request) => {
+    const actor = actorFromRequest(request); const { auctionId } = auctionParam.parse(request.params); const body = parseBody(whatsappConsentBody, request.body);
+    return context.registrations.setWhatsAppConsent(auctionId, actor.userId, body.whatsappOptIn, idempotencyKey(request), correlationId(request));
   });
   app.get('/v1/auctions/:auctionId/registrations/me', async (request) => {
     const actor = actorFromRequest(request); const { auctionId } = auctionParam.parse(request.params); return context.registrations.getForUser(auctionId, actor.userId);
@@ -131,7 +138,7 @@ export async function createApp(context = createContext()): Promise<{ app: Fasti
   });
   app.post('/v1/manager/lots/:lotId/floor-bids', async (request) => {
     const actor = managerFromRequest(request); const { lotId } = lotParam.parse(request.params); const body = parseBody(floorBidBody, request.body);
-    return context.bidding.placeBid({ lotId, userId: body.participantId, amountCents: body.amountCents, expectedVersion: body.expectedVersion ? BigInt(body.expectedVersion) : undefined, origin: body.origin, acquisitionSource: body.acquisitionSource, displayName: trustedDisplayName(request, body.displayName), actorId: actor.userId, autoApproveRegistration: true, idempotencyKey: idempotencyKey(request), correlationId: correlationId(request) });
+    return context.bidding.placeBid({ lotId, userId: body.participantId, amountCents: body.amountCents, expectedVersion: body.expectedVersion ? BigInt(body.expectedVersion) : undefined, origin: body.origin, acquisitionSource: body.acquisitionSource, whatsappOptIn: body.whatsappOptIn, displayName: trustedDisplayName(request, body.displayName), actorId: actor.userId, autoApproveRegistration: true, idempotencyKey: idempotencyKey(request), correlationId: correlationId(request) });
   });
   app.get('/v1/manager/auctions/:auctionId/pending-bids', async (request) => {
     managerFromRequest(request); const { auctionId } = auctionParam.parse(request.params); const query = pendingBidsQuery.parse(request.query);

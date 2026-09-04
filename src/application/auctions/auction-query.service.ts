@@ -4,6 +4,7 @@ import { DomainError } from '../../domain/errors.js';
 import { centsToJson } from '../../domain/money.js';
 import { participantAlias, readableParticipantName } from '../../domain/identity.js';
 import { activeIncrementCents, nextBidCents } from '../../domain/bid-increment.js';
+import { isPublicRealtimeEvent, PUBLIC_REALTIME_EVENT_TYPES } from '../../domain/public-events.js';
 
 type BidderProjection = {
   currentBidderId: string | null;
@@ -156,8 +157,14 @@ export class AuctionQueryService {
   }
 
   async getEvents(lotId: string, since: bigint, limit = 500): Promise<Array<Record<string, unknown>>> {
-    const result = await this.database.prisma.auctionEventLog.findMany({ where: { lotId, lotSequence: { gt: since } }, orderBy: { lotSequence: 'asc' }, take: limit });
-    return result.map((row) => ({ ...normalizePublicEventPayload(row.payload as Record<string, unknown>), lotSequence: row.lotSequence?.toString() ?? null }));
+    const result = await this.database.prisma.auctionEventLog.findMany({
+      where: { lotId, lotSequence: { gt: since }, eventType: { in: [...PUBLIC_REALTIME_EVENT_TYPES] } },
+      orderBy: { lotSequence: 'asc' },
+      take: limit,
+    });
+    return result
+      .filter((row) => isPublicRealtimeEvent(row.eventType))
+      .map((row) => ({ ...normalizePublicEventPayload(row.payload as Record<string, unknown>), lotSequence: row.lotSequence?.toString() ?? null }));
   }
 
   async getAuctionIdForLot(lotId: string): Promise<string> {

@@ -17,7 +17,7 @@ describe('RegistrationService', () => {
       auctionExecution: { findUnique: vi.fn().mockResolvedValue({ id: 'auction-id' }) },
       auctionRegistration: {
         findUnique: vi.fn().mockResolvedValue(null),
-        create: vi.fn().mockResolvedValue({ id: 'registration-id', acceptedAt }),
+        create: vi.fn().mockResolvedValue({ id: 'registration-id', userId: 'user-id', status: 'PENDING', termsVersion: 'terms-v1', acquisitionSource: 'UNKNOWN', whatsappOptIn: false, whatsappConsentAt: null, whatsappConsentVersion: null, acceptedAt }),
       },
       outboxEvent: { create: vi.fn().mockResolvedValue({}) },
     };
@@ -26,7 +26,7 @@ describe('RegistrationService', () => {
     const result = await service.register('auction-id', 'user-id', 'terms-v1', 'registration-key', 'correlation-id');
 
     expect(result).toMatchObject({ registrationId: 'registration-id', status: 'PENDING', userId: 'user-id' });
-    expect(client.auctionRegistration.create).toHaveBeenCalledWith({ data: { auctionId: 'auction-id', userId: 'user-id', status: 'PENDING', termsVersion: 'terms-v1', acquisitionSource: 'UNKNOWN' } });
+    expect(client.auctionRegistration.create).toHaveBeenCalledWith({ data: expect.objectContaining({ auctionId: 'auction-id', userId: 'user-id', status: 'PENDING', termsVersion: 'terms-v1', acquisitionSource: 'UNKNOWN', whatsappOptIn: false }) });
     expect(client.outboxEvent.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ eventType: 'registration.requested' }) }));
   });
 
@@ -36,7 +36,7 @@ describe('RegistrationService', () => {
       auctionExecution: { findUnique: vi.fn().mockResolvedValue({ id: 'auction-id' }) },
       auctionRegistration: {
         findUnique: vi.fn().mockResolvedValue(null),
-        create: vi.fn().mockResolvedValue({ id: 'registration-id', acceptedAt }),
+        create: vi.fn().mockResolvedValue({ id: 'registration-id', userId: 'user-id', status: 'APPROVED', termsVersion: 'terms-v1', acquisitionSource: 'UNKNOWN', whatsappOptIn: false, whatsappConsentAt: null, whatsappConsentVersion: null, acceptedAt }),
       },
       outboxEvent: { create: vi.fn().mockResolvedValue({}) },
     };
@@ -45,7 +45,7 @@ describe('RegistrationService', () => {
     const result = await service.register('auction-id', 'user-id', 'terms-v1', 'registration-key', 'correlation-id', true);
 
     expect(result).toMatchObject({ registrationId: 'registration-id', status: 'APPROVED', userId: 'user-id' });
-    expect(client.auctionRegistration.create).toHaveBeenCalledWith({ data: { auctionId: 'auction-id', userId: 'user-id', status: 'APPROVED', termsVersion: 'terms-v1', acquisitionSource: 'UNKNOWN' } });
+    expect(client.auctionRegistration.create).toHaveBeenCalledWith({ data: expect.objectContaining({ auctionId: 'auction-id', userId: 'user-id', status: 'APPROVED', termsVersion: 'terms-v1', acquisitionSource: 'UNKNOWN', whatsappOptIn: false }) });
     expect(client.outboxEvent.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ eventType: 'registration.approved' }) }));
   });
 
@@ -62,6 +62,7 @@ describe('RegistrationService', () => {
       },
       outboxEvent: { create: vi.fn().mockResolvedValue({}) },
       $queryRaw: vi.fn().mockResolvedValue([]),
+      auctionExecution: { findUnique: vi.fn().mockResolvedValue({ externalAuctionId: 'external-auction-id' }) },
     };
     const service = serviceWithClient(client);
 
@@ -88,6 +89,24 @@ describe('RegistrationService', () => {
     expect(client.auctionRegistration.update).toHaveBeenCalledWith({ where: { id: 'registration-id' }, data: { acquisitionSource: 'WHATSAPP' } });
   });
 
+  it('records and revokes WhatsApp consent idempotently', async () => {
+    const acceptedAt = new Date('2026-08-05T12:00:00.000Z');
+    const registration = { id: 'registration-id', auctionId: 'auction-id', userId: 'user-id', status: 'APPROVED', termsVersion: 'terms-v1', acquisitionSource: 'DIRECT', whatsappOptIn: true, whatsappConsentAt: acceptedAt, whatsappConsentVersion: 'auction-whatsapp-v1', acceptedAt };
+    const revoked = { ...registration, whatsappOptIn: false, whatsappConsentAt: null, whatsappConsentVersion: null };
+    const client = {
+      managerAction: { findUnique: vi.fn().mockResolvedValue(null), create: vi.fn().mockResolvedValue({}) },
+      auctionRegistration: { findUnique: vi.fn().mockResolvedValue(registration), update: vi.fn().mockResolvedValue(revoked) },
+      outboxEvent: { create: vi.fn().mockResolvedValue({}) },
+    };
+    const service = serviceWithClient(client);
+
+    const result = await service.setWhatsAppConsent('auction-id', 'user-id', false, 'consent-key', 'correlation-id');
+
+    expect(result).toMatchObject({ whatsappOptIn: false, whatsappConsentAt: null });
+    expect(client.auctionRegistration.update).toHaveBeenCalledWith({ where: { id: 'registration-id' }, data: { whatsappOptIn: false, whatsappConsentAt: null, whatsappConsentVersion: null } });
+    expect(client.outboxEvent.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ eventType: 'registration.whatsapp_consent.changed' }) }));
+  });
+
   it('releases deferred bids after enabling the participant', async () => {
     const acceptedAt = new Date('2026-08-05T12:00:00.000Z');
     const client = {
@@ -101,6 +120,7 @@ describe('RegistrationService', () => {
       },
       outboxEvent: { create: vi.fn().mockResolvedValue({}) },
       $queryRaw: vi.fn().mockResolvedValue([]),
+      auctionExecution: { findUnique: vi.fn().mockResolvedValue({ externalAuctionId: 'external-auction-id' }) },
     };
     const bidding = { activatePendingBids: vi.fn().mockResolvedValue({ processed: 2, accepted: 2, rejected: 0 }) };
     const service = serviceWithClient(client, bidding);

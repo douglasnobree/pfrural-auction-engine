@@ -5,6 +5,56 @@ import { createApp } from './app.js';
 const runIntegration = process.env.RUN_INTEGRATION_TESTS === 'true';
 
 describe.skipIf(!runIntegration)('auction engine API integration', () => {
+  it('emits private, idempotent participant notifications for proxy leadership and the winner', async () => {
+    const { app, context } = await createApp();
+    try {
+      const key = `integration-notifications-${Date.now().toString(36)}`;
+      const sandbox = await context.sandbox.create({ participantId: 'notification-user-a', lotCount: 1, idempotencyKey: key }, key);
+      const auctionId = String((sandbox as { auctionId: string }).auctionId);
+      const auction = await context.database.prisma.auctionExecution.findUniqueOrThrow({ where: { id: auctionId }, include: { lots: true } });
+      const lot = auction.lots[0];
+      if (!lot) throw new Error('Notification integration lot is missing');
+      await context.database.prisma.auctionExecution.update({ where: { id: auction.id }, data: { mode: 'TIMED', status: 'RUNNING', preBidEnabled: false } });
+      await context.database.prisma.auctionLotExecution.update({ where: { id: lot.id }, data: { status: 'OPEN', startingBidCents: 10000n, incrementCents: 1000n, currentPriceCents: null, currentBidderId: null, currentBidderAlias: null, endsAt: new Date(Date.now() + 60_000) } });
+      for (const userId of ['notification-user-a', 'notification-user-b']) {
+        await context.database.prisma.auctionRegistration.upsert({
+          where: { auctionId_userId: { auctionId: auction.id, userId } },
+          create: { auctionId: auction.id, userId, status: 'APPROVED', termsVersion: 'sandbox-v1', whatsappOptIn: true, whatsappConsentAt: new Date(), whatsappConsentVersion: 'auction-whatsapp-v1' },
+          update: { status: 'APPROVED', whatsappOptIn: true, whatsappConsentAt: new Date(), whatsappConsentVersion: 'auction-whatsapp-v1' },
+        });
+      }
+      const proxyRequest = { method: 'PUT' as const, url: `/v1/lots/${lot.id}/proxy-bid`, headers: { 'x-user-id': 'notification-user-a', 'idempotency-key': `${key}-proxy` }, payload: { amountCents: '30000' } };
+      expect((await app.inject(proxyRequest)).statusCode).toBe(200);
+      expect((await app.inject(proxyRequest)).statusCode).toBe(200);
+      const coveredRequest = { method: 'POST' as const, url: `/v1/lots/${lot.id}/bids`, headers: { 'x-user-id': 'notification-user-b', 'idempotency-key': `${key}-covered` }, payload: { amountCents: '20000' } };
+      expect((await app.inject(coveredRequest)).statusCode).toBe(200);
+      expect((await app.inject(coveredRequest)).statusCode).toBe(200);
+      const winningBid = await app.inject({ method: 'POST', url: `/v1/lots/${lot.id}/bids`, headers: { 'x-user-id': 'notification-user-b', 'idempotency-key': `${key}-winning` }, payload: { amountCents: '40000' } });
+      expect(winningBid.statusCode).toBe(200);
+      await context.bidding.closeLot(lot.id, `${key}-close`);
+
+      const notifications = await context.database.prisma.outboxEvent.findMany({ where: { auctionId: auction.id, eventType: 'participant.notification.requested' }, orderBy: { occurredAt: 'asc' } });
+      const payloads = notifications.map((row) => (row.payload as { payload: Record<string, unknown> }).payload);
+      expect(payloads).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: 'BID_ACCEPTED', participantId: 'notification-user-a' }),
+        expect.objectContaining({ type: 'BID_ACCEPTED_OUTBID', participantId: 'notification-user-b' }),
+        expect.objectContaining({ type: 'AUTOMATIC_BID_APPLIED', participantId: 'notification-user-a' }),
+        expect.objectContaining({ type: 'OUTBID', participantId: 'notification-user-a' }),
+        expect.objectContaining({ type: 'LOT_WON', participantId: 'notification-user-b' }),
+      ]));
+      expect(payloads.filter((payload) => payload.type === 'BID_ACCEPTED_OUTBID')).toHaveLength(1);
+      expect(JSON.stringify(payloads)).not.toContain('maxBidCents');
+      expect(JSON.stringify(payloads)).not.toContain('proxyMaxBidCents');
+      expect(await context.database.prisma.auctionEventLog.count({ where: { auctionId: auction.id, eventType: 'participant.notification.requested' } })).toBe(0);
+    } finally {
+      context.realtime.close();
+      await app.close();
+      await context.rabbit.close();
+      await context.redis.close();
+      await context.database.close();
+    }
+  });
+
   it('sells a shopping lot to the first approved buyer and rejects all later buyers', async () => {
     const { app, context } = await createApp();
     try {
