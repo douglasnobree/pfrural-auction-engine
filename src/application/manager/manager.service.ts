@@ -14,7 +14,7 @@ export class ManagerService {
   async auctionCommand(auctionId: string, action: 'start' | 'pause' | 'resume' | 'finish', actorId: string, idempotencyKey: string, expectedVersion: bigint | undefined, correlationId: string): Promise<Record<string, unknown>> {
     const target: Record<typeof action, AuctionStatus> = { start: 'RUNNING', pause: 'PAUSED', resume: 'RUNNING', finish: 'FINISHED' };
     if (action === 'finish') await this.closePreBidLots(auctionId, actorId, correlationId);
-    return this.database.transaction(async (client) => {
+    const response = await this.database.transaction(async (client) => {
       const saved = await this.findAction(client, actorId, idempotencyKey);
       if (saved) return saved;
       await client.$queryRaw`SELECT id FROM auction_execution WHERE id = ${auctionId}::uuid FOR UPDATE`;
@@ -30,34 +30,28 @@ export class ManagerService {
       await appendDomainEvent(client, { eventType: `auction.${eventName}`, routingKey: `auction.${eventName}`, aggregateType: 'auction_execution', aggregateId: auctionId, auctionId, aggregateVersion: version, correlationId, actorId, payload: response, writeEventLog: false });
       return response;
     });
+    if (action === 'start') {
+      await this.resumeCurrentLiveLot(auctionId, actorId, correlationId);
+    }
+    return response;
   }
 
   async expirePreBidWindows(now = new Date()): Promise<{ finishedAuctions: number; pausedLiveLots: number }> {
     const dueAuctions = await this.database.prisma.auctionExecution.findMany({
       where: {
-        status: { in: ['SCHEDULED', 'RUNNING', 'PAUSED'] },
+        status: 'SCHEDULED',
+        mode: 'LIVE',
+        preBidEnabled: true,
         OR: [
-          {
-            mode: 'TIMED',
-            preBidEnabled: true,
-            preBidEndsAt: { lte: now },
-          },
-          {
-            mode: 'LIVE',
-            status: 'SCHEDULED',
-            preBidEnabled: true,
-            OR: [
-              { preBidEndsAt: { lte: now } },
-              { preBidEndsAt: null, startsAt: { lte: now } },
-            ],
-          },
+          { preBidEndsAt: { lte: now } },
+          { preBidEndsAt: null, startsAt: { lte: now } },
         ],
       },
       select: { id: true, mode: true, preBidEndsAt: true, startsAt: true },
       take: 100,
     });
 
-    let finishedAuctions = 0;
+    const finishedAuctions = 0;
     let pausedLiveLots = 0;
     const actorId = 'system:prebid-lifecycle';
 
@@ -89,18 +83,36 @@ export class ManagerService {
         continue;
       }
 
-      await this.auctionCommand(
-        auction.id,
-        'finish',
-        actorId,
-        `prebid-expiration:finish:${auction.id}`,
-        undefined,
-        `prebid-expiration:${auction.id}`,
-      );
-      finishedAuctions += 1;
     }
 
     return { finishedAuctions, pausedLiveLots };
+  }
+
+  private async resumeCurrentLiveLot(
+    auctionId: string,
+    actorId: string,
+    correlationId: string,
+  ): Promise<void> {
+    const auction = await this.database.prisma.auctionExecution.findUnique({
+      where: { id: auctionId },
+      select: { mode: true, status: true, currentLotId: true },
+    });
+    if (auction?.mode !== 'LIVE' || auction.status !== 'RUNNING' || !auction.currentLotId) {
+      return;
+    }
+    const currentLot = await this.database.prisma.auctionLotExecution.findUnique({
+      where: { id: auction.currentLotId },
+      select: { status: true },
+    });
+    if (currentLot?.status !== 'PAUSED') return;
+    await this.lotCommand(
+      auction.currentLotId,
+      'resume',
+      actorId,
+      `auction-start:resume:${auction.currentLotId}`,
+      undefined,
+      correlationId,
+    );
   }
 
   private async closePreBidLots(auctionId: string, actorId: string, correlationId: string): Promise<void> {

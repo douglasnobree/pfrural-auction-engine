@@ -7,7 +7,11 @@ import { DomainError, isDomainError } from '../../domain/errors.js';
 import { participantAlias, readableParticipantName } from '../../domain/identity.js';
 import { evaluateProxyBid } from '../../domain/proxy-bid.js';
 import { parseCents } from '../../domain/money.js';
-import { assertBiddingWindow, isPreBidWindow } from '../../domain/bidding-window.js';
+import {
+  assertBiddingWindow,
+  assertShoppingPurchaseWindow,
+  isPreBidWindow,
+} from '../../domain/bidding-window.js';
 import { BID_APPROVAL_FEATURE_ENABLED, requiresManagerApproval } from '../../domain/bid-approval.js';
 import { activeIncrementCents, advanceIncrementState, nextBidCents as calculateNextBidCents, openingBidCents } from '../../domain/bid-increment.js';
 import type { AcquisitionSource, BidOrigin, BidPhase, ProxyEntry } from '../../domain/types.js';
@@ -164,6 +168,13 @@ export class BiddingService {
         throw new DomainError('COMMAND_IN_PROGRESS', 'The purchase is already being processed', 409);
       }
 
+      assertShoppingPurchaseWindow({
+        mode: lot.auction.mode,
+        status: lot.auction.status,
+        startsAt: lot.auction.startsAt,
+        endsAt: lot.auction.endsAt,
+        now: new Date(),
+      });
       if (!['SCHEDULED', 'RUNNING'].includes(lot.auction.status)) throw new DomainError('AUCTION_NOT_OPEN', 'This shopping auction is not available', 409);
       if (lot.status !== 'OPEN') throw new DomainError('SHOPPING_ALREADY_SOLD', 'This shopping lot is no longer available', 409);
       if (lot.availableQuantity < 1) throw new DomainError('SHOPPING_ALREADY_SOLD', 'This shopping lot is no longer available', 409);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assertBiddingWindow, auctionAcceptsBids, isLiveBiddingWindow, isPreBidExpired, isPreBidWindow, preBidCutoffAt } from './bidding-window.js';
+import { assertBiddingWindow, assertShoppingPurchaseWindow, auctionAcceptsBids, isLiveBiddingWindow, isPreBidExpired, isPreBidWindow, isShoppingPurchaseWindow, preBidCutoffAt } from './bidding-window.js';
 
 describe('auction bidding windows', () => {
   it('keeps timed auctions available for pre-bids while scheduled', () => {
@@ -29,10 +29,14 @@ describe('auction bidding windows', () => {
     expect(() => assertBiddingWindow({ mode: 'TIMED', status: 'SCHEDULED', preBidEnabled: true })).toThrowError('Pre-bidding is not configured');
   });
 
-  it('treats shopping as the pre-bid nomenclature', () => {
-    expect(isPreBidWindow('SHOPPING', 'SCHEDULED')).toBe(true);
-    expect(auctionAcceptsBids('SHOPPING', 'SCHEDULED')).toBe(true);
-    expect(auctionAcceptsBids('SHOPPING', 'RUNNING')).toBe(true);
+  it('keeps shopping outside the bid window and uses its purchase interval', () => {
+    expect(isPreBidWindow('SHOPPING', 'SCHEDULED')).toBe(false);
+    expect(auctionAcceptsBids('SHOPPING', 'SCHEDULED')).toBe(false);
+    const startsAt = new Date('2026-08-05T14:00:00.000Z');
+    const endsAt = new Date('2026-08-05T16:00:00.000Z');
+    expect(isShoppingPurchaseWindow({ mode: 'SHOPPING', status: 'SCHEDULED', startsAt, endsAt, now: startsAt })).toBe(true);
+    expect(isShoppingPurchaseWindow({ mode: 'SHOPPING', status: 'SCHEDULED', startsAt, endsAt, now: endsAt })).toBe(false);
+    expect(() => assertShoppingPurchaseWindow({ mode: 'SHOPPING', status: 'SCHEDULED', startsAt, endsAt, now: endsAt })).toThrowError('not available');
   });
 
   it('enforces the configured pre-bid dates', () => {
@@ -46,12 +50,18 @@ describe('auction bidding windows', () => {
     expect(isPreBidExpired({ mode: 'LIVE', preBidEnabled: true, auctionStartsAt: startsAt }, startsAt)).toBe(true);
   });
 
-  it('does not reopen a timed auction after its pre-bid cutoff', () => {
+  it('allows timed bidding after the pause and blocks only the scheduled pause boundary', () => {
+    expect(() => assertBiddingWindow({
+      mode: 'TIMED',
+      status: 'SCHEDULED',
+      preBidEndsAt: new Date('2026-08-05T14:00:00.000Z'),
+      now: new Date('2026-08-05T14:00:00.000Z'),
+    })).toThrowError('Pre-bidding has ended');
     expect(() => assertBiddingWindow({
       mode: 'TIMED',
       status: 'RUNNING',
       preBidEndsAt: new Date('2026-08-05T14:00:00.000Z'),
       now: new Date('2026-08-05T14:00:00.000Z'),
-    })).toThrowError('Pre-bidding has ended');
+    })).not.toThrow();
   });
 });

@@ -36,14 +36,19 @@ export class ExecutionPublishService {
 
   async publish(input: PublishExecutionInput, correlationId: string): Promise<Record<string, unknown>> {
     if (input.lots.length === 0) throw new DomainError('LOTS_REQUIRED', 'At least one lot is required to publish an execution', 422);
-    const preBidEnabled = input.preBidEnabled ?? Boolean(input.preBidStartsAt || input.preBidEndsAt);
+    const isShopping = input.mode === 'SHOPPING';
+    const preBidEnabled = !isShopping && (input.preBidEnabled ?? Boolean(input.preBidStartsAt || input.preBidEndsAt));
+    const preBidStartsAt = isShopping || !input.preBidStartsAt ? null : new Date(input.preBidStartsAt);
+    const preBidEndsAt = isShopping || !input.preBidEndsAt ? null : new Date(input.preBidEndsAt);
+    const startsAt = input.startsAt ? new Date(input.startsAt) : null;
+    const endsAt = isShopping && input.endsAt ? new Date(input.endsAt) : null;
     return this.database.transaction(async (client) => {
       let auction = await client.auctionExecution.findUnique({ where: { externalAuctionId: input.externalAuctionId } });
       let created = false;
       if (!auction) {
         auction = await client.auctionExecution.create({ data: {
           externalAuctionId: input.externalAuctionId, title: input.title, mode: input.mode as PrismaAuctionMode, status: 'SCHEDULED', currency: input.currency ?? 'BRL', regulationVersion: input.regulationVersion,
-          approvalMode: 'AUTOMATIC', preBidEnabled, preBidStartsAt: input.preBidStartsAt ? new Date(input.preBidStartsAt) : null, preBidEndsAt: input.preBidEndsAt ? new Date(input.preBidEndsAt) : null, startsAt: input.startsAt ? new Date(input.startsAt) : null, endsAt: input.endsAt ? new Date(input.endsAt) : null,
+          approvalMode: 'AUTOMATIC', preBidEnabled, preBidStartsAt, preBidEndsAt, startsAt, endsAt,
         } });
         created = true;
       } else {
@@ -54,10 +59,10 @@ export class ExecutionPublishService {
           regulationVersion: input.regulationVersion,
           approvalMode: 'AUTOMATIC',
           preBidEnabled,
-          ...(input.preBidStartsAt !== undefined ? { preBidStartsAt: input.preBidStartsAt ? new Date(input.preBidStartsAt) : null } : {}),
-          ...(input.preBidEndsAt !== undefined ? { preBidEndsAt: input.preBidEndsAt ? new Date(input.preBidEndsAt) : null } : {}),
-          ...(input.startsAt !== undefined ? { startsAt: input.startsAt ? new Date(input.startsAt) : null } : {}),
-          ...(input.endsAt !== undefined ? { endsAt: input.endsAt ? new Date(input.endsAt) : null } : {}),
+          preBidStartsAt,
+          preBidEndsAt,
+          startsAt,
+          endsAt,
         } });
       }
       const lots: Array<{ id: string; externalLotId: string; status: string }> = [];
@@ -67,28 +72,38 @@ export class ExecutionPublishService {
           where: { auctionId_externalLotId: { auctionId: auction.id, externalLotId: inputLot.externalLotId } },
           create: {
             auctionId: auction.id, externalLotId: inputLot.externalLotId, lotNumber: inputLot.lotNumber, title: inputLot.title, status: desiredStatus,
-            startingBidCents: BigInt(inputLot.startingBidCents ?? '0'), incrementCents: BigInt(inputLot.incrementCents ?? '1'), secondaryIncrementCents: inputLot.secondaryIncrementCents == null ? null : BigInt(inputLot.secondaryIncrementCents), reservePriceCents: inputLot.reservePriceCents ? BigInt(inputLot.reservePriceCents) : null, fixedPriceCents: inputLot.fixedPriceCents ? BigInt(inputLot.fixedPriceCents) : null,
-            quantity: inputLot.quantity ?? 1, availableQuantity: inputLot.quantity ?? 1, startsAt: inputLot.startsAt ? new Date(inputLot.startsAt) : null, endsAt: inputLot.endsAt ? new Date(inputLot.endsAt) : null,
+            startingBidCents: BigInt(inputLot.startingBidCents ?? '0'), incrementCents: isShopping ? 1n : BigInt(inputLot.incrementCents ?? '1'), secondaryIncrementCents: isShopping || inputLot.secondaryIncrementCents == null ? null : BigInt(inputLot.secondaryIncrementCents), reservePriceCents: inputLot.reservePriceCents ? BigInt(inputLot.reservePriceCents) : null, fixedPriceCents: isShopping && inputLot.fixedPriceCents ? BigInt(inputLot.fixedPriceCents) : null,
+            quantity: isShopping ? 1 : inputLot.quantity ?? 1, availableQuantity: isShopping ? 1 : inputLot.quantity ?? 1, startsAt: inputLot.startsAt ? new Date(inputLot.startsAt) : null, endsAt: isShopping ? null : inputLot.endsAt ? new Date(inputLot.endsAt) : null,
           },
           update: {
             title: inputLot.title,
             lotNumber: inputLot.lotNumber,
-            ...(inputLot.fixedPriceCents !== undefined
-              ? {
-                  fixedPriceCents:
-                    inputLot.fixedPriceCents === null
-                      ? null
-                      : BigInt(inputLot.fixedPriceCents),
-                }
+            ...(inputLot.startingBidCents !== undefined
+              ? { startingBidCents: BigInt(inputLot.startingBidCents) }
               : {}),
-            ...(inputLot.secondaryIncrementCents !== undefined
-              ? {
-                  secondaryIncrementCents:
-                    inputLot.secondaryIncrementCents === null
-                      ? null
-                      : BigInt(inputLot.secondaryIncrementCents),
-                }
-              : {}),
+            ...(isShopping
+              ? { incrementCents: 1n, secondaryIncrementCents: null }
+              : inputLot.incrementCents !== undefined
+                ? {
+                    incrementCents: BigInt(inputLot.incrementCents),
+                    secondaryIncrementCents:
+                      inputLot.secondaryIncrementCents == null
+                        ? null
+                        : BigInt(inputLot.secondaryIncrementCents),
+                  }
+                : {}),
+            ...(isShopping
+              ? inputLot.fixedPriceCents !== undefined
+                ? {
+                    fixedPriceCents:
+                      inputLot.fixedPriceCents === null
+                        ? null
+                        : BigInt(inputLot.fixedPriceCents),
+                  }
+                : {}
+              : { fixedPriceCents: null }),
+            startsAt: inputLot.startsAt ? new Date(inputLot.startsAt) : null,
+            endsAt: isShopping ? null : inputLot.endsAt ? new Date(inputLot.endsAt) : null,
           },
         });
         if (auction.status === 'SCHEDULED' && ['QUEUED', 'OPEN', 'PAUSED'].includes(lot.status) && lot.status !== desiredStatus) {
