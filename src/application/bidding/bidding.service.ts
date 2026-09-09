@@ -135,6 +135,7 @@ export interface PendingEligibilityBid {
   externalLotId: string;
   lotNumber: number;
   lotTitle: string;
+  registrationId: string | null;
   participantId: string;
   displayName: string | null;
   amountCents: string;
@@ -746,6 +747,16 @@ export class BiddingService {
       orderBy: [{ receivedAt: 'asc' }, { id: 'asc' }],
       take: limit + 1,
     });
+    const participantIds = [...new Set(rows.map((row) => row.userId))];
+    const registrations = participantIds.length
+      ? await this.database.prisma.auctionRegistration.findMany({
+          where: { auctionId, userId: { in: participantIds } },
+          select: { id: true, userId: true },
+        })
+      : [];
+    const registrationByUserId = new Map(
+      registrations.map((registration) => [registration.userId, registration.id]),
+    );
     return {
       hasMore: rows.length > limit,
       items: rows.slice(0, limit).map((row) => ({
@@ -754,6 +765,7 @@ export class BiddingService {
         externalLotId: row.lot.externalLotId,
         lotNumber: row.lot.lotNumber,
         lotTitle: row.lot.title,
+        registrationId: registrationByUserId.get(row.userId) ?? null,
         participantId: row.userId,
         displayName: row.displayName,
         amountCents: row.requestedAmountCents.toString(),

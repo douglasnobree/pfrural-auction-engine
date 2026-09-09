@@ -310,6 +310,7 @@ describe.skipIf(!runIntegration)('auction engine API integration', () => {
       expect(snapshotBeforeApproval.json().lots[0]).toMatchObject({ currentPriceCents: null, lotSequence: '0', version: '0' });
 
       const savedRegistration = await context.database.prisma.auctionRegistration.findUniqueOrThrow({ where: { auctionId_userId: { auctionId: auction.id, userId: 'deferred-user' } } });
+      expect(pendingEligibility.json().items[0].registrationId).toBe(savedRegistration.id);
       const enabled = await app.inject({
         method: 'PUT',
         url: `/v1/manager/auctions/${auction.id}/registrations/${savedRegistration.id}`,
