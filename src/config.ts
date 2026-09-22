@@ -30,5 +30,16 @@ if (parsed.NODE_ENV === 'production' && parsed.AUTH_MODE === 'mock') {
   throw new Error('AUTH_MODE=mock is not allowed in production');
 }
 
+if (
+  parsed.NODE_ENV === 'production' &&
+  (parsed.AUTH_MODE !== 'internal' ||
+    parsed.INTERNAL_SERVICE_TOKEN === 'local-development-token' ||
+    parsed.INTERNAL_SERVICE_TOKEN.length < 32)
+) {
+  throw new Error(
+    'A production auction engine requires AUTH_MODE=internal and a strong INTERNAL_SERVICE_TOKEN',
+  );
+}
+
 export const config = parsed;
 export type Config = typeof config;

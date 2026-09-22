@@ -41,6 +41,11 @@ npm run dev:api
 npm run dev:worker
 ```
 
+Em produção, use `AUTH_MODE=internal` e configure `INTERNAL_SERVICE_TOKEN` com
+pelo menos 32 caracteres aleatórios. O token de desenvolvimento não é aceito
+pelo engine em produção. A API aceita requisições de qualquer origem; a
+autorização continua sendo feita pelos tokens e controles internos.
+
 API: `http://localhost:4100`, health: `GET /health`, readiness: `GET /ready`. RabbitMQ management: `http://localhost:15672` (`auction_engine`/`change_this_rabbitmq_password`). PostgreSQL local: porta `5433`; Redis: porta `6379`.
 
 O seed cria um leilão `TIMED` e um lote aberto. Em desenvolvimento a identidade usa `x-user-id` e `x-actor-role`; isso é rejeitado em produção quando `AUTH_MODE=mock`.

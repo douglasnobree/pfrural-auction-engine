@@ -50,7 +50,10 @@ export function createContext(): AppContext {
 export async function createApp(context = createContext()): Promise<{ app: FastifyInstance; context: AppContext }> {
   const app = Fastify({ logger: { level: config.LOG_LEVEL } });
   app.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string' }, (_request, body, done) => done(null, body));
-  await app.register(cors, { origin: true });
+  await app.register(cors, {
+    origin: true,
+    credentials: true,
+  });
   context.realtime = new RealtimeGateway(context.tickets, context.queries, context.hub);
   context.realtime.attach(app.server);
   void context.rabbit.consume('auction.websocket.v1', async (envelope) => {
