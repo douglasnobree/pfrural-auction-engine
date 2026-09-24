@@ -13,14 +13,34 @@ export interface RabbitMessageHandler {
 export class RabbitMq {
   private connection: ChannelModel | null = null;
   private channel: ConfirmChannel | null = null;
+  private connectionUnavailable = false;
+  private closing = false;
 
   async connect(): Promise<void> {
     if (this.channel) return;
-    const connection = await amqp.connect(config.RABBITMQ_URL);
+    let connection: ChannelModel;
+    try {
+      connection = await amqp.connect(config.RABBITMQ_URL);
+    } catch (error) {
+      this.logConnectionError(error);
+      throw error;
+    }
+    connection.on('error', (error: Error) => this.logConnectionError(error));
+    connection.on('close', () => {
+      if (this.closing) {
+        console.info('[rabbitmq] connection closed');
+      } else if (!this.connectionUnavailable) {
+        this.connectionUnavailable = true;
+        console.warn('[rabbitmq] connection closed unexpectedly');
+      }
+    });
     const channel = await connection.createConfirmChannel();
+    channel.on('error', (error: Error) => console.error('[rabbitmq] channel error', { error: error.message }));
     this.connection = connection;
     this.channel = channel;
     await this.configureTopology(channel);
+    console.info(`[rabbitmq] ${this.connectionUnavailable ? 'connection restored' : 'connected'}; topology ready`);
+    this.connectionUnavailable = false;
   }
 
   isConnected(): boolean {
@@ -39,6 +59,7 @@ export class RabbitMq {
     if (!this.channel) throw new Error('RabbitMQ channel unavailable');
     this.channel.publish(RETRY_EXCHANGE, routingKey, Buffer.from(JSON.stringify(envelope)), { persistent: true, contentType: 'application/json', headers: { 'x-retry-count': retryCount } });
     await this.channel.waitForConfirms();
+    console.warn('[rabbitmq] message forwarded for retry', { routingKey, eventId: envelope.eventId, eventType: envelope.eventType, retryCount });
   }
 
   async publishDead(routingKey: string, envelope: EventEnvelope, error: string): Promise<void> {
@@ -46,6 +67,7 @@ export class RabbitMq {
     if (!this.channel) throw new Error('RabbitMQ channel unavailable');
     this.channel.publish(DEAD_EXCHANGE, routingKey, Buffer.from(JSON.stringify(envelope)), { persistent: true, contentType: 'application/json', headers: { 'x-error': error } });
     await this.channel.waitForConfirms();
+    console.error('[rabbitmq] message forwarded to dead-letter exchange', { routingKey, eventId: envelope.eventId, eventType: envelope.eventType });
   }
 
   async consume(queue: string, handler: RabbitMessageHandler): Promise<void> {
@@ -62,18 +84,35 @@ export class RabbitMq {
       } catch (error) {
         const retryCount = Number(message.properties.headers?.['x-retry-count'] ?? 0);
         const envelope = JSON.parse(message.content.toString()) as EventEnvelope;
+        console.error('[rabbitmq] consumer message failed', {
+          queue,
+          routingKey: message.fields.routingKey,
+          eventId: envelope.eventId,
+          eventType: envelope.eventType,
+          retryCount,
+          error: error instanceof Error ? error.message : String(error),
+        });
         if (retryCount < 5) await this.publishRetry(message.fields.routingKey, envelope, retryCount + 1);
         else await this.publishDead(message.fields.routingKey, envelope, error instanceof Error ? error.message : 'consumer failure');
         this.channel?.ack(message);
       }
     });
+    console.info('[rabbitmq] consumer listening', { queue });
   }
 
   async close(): Promise<void> {
+    this.closing = true;
     await this.channel?.close().catch(() => undefined);
     await this.connection?.close().catch(() => undefined);
     this.channel = null;
     this.connection = null;
+    this.closing = false;
+  }
+
+  private logConnectionError(error: unknown): void {
+    if (this.connectionUnavailable) return;
+    this.connectionUnavailable = true;
+    console.error('[rabbitmq] connection error', { error: error instanceof Error ? error.message : String(error) });
   }
 
   private async configureTopology(channel: ConfirmChannel): Promise<void> {

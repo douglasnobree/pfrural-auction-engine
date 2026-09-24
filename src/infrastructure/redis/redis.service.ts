@@ -4,6 +4,25 @@ import { config } from '../../config.js';
 export class RedisService {
   private readonly redis = new Redis(config.REDIS_URL, { lazyConnect: true, maxRetriesPerRequest: 1 });
   private readonly fallback = new Map<string, { count: number; expiresAt: number }>();
+  private unavailable = false;
+  private closing = false;
+
+  constructor() {
+    this.redis.on('ready', () => {
+      console.info(`[redis] ${this.unavailable ? 'connection restored' : 'connected'}`);
+      this.unavailable = false;
+    });
+    this.redis.on('error', (error: Error) => {
+      if (this.unavailable) return;
+      this.unavailable = true;
+      console.error('[redis] connection error', { error: error.message });
+    });
+    this.redis.on('close', () => {
+      if (this.closing || this.unavailable) return;
+      this.unavailable = true;
+      console.warn('[redis] connection closed');
+    });
+  }
 
   async connect(): Promise<void> {
     try { await this.redis.connect(); } catch { /* Redis is auxiliary and may be unavailable. */ }
@@ -36,6 +55,9 @@ export class RedisService {
   }
 
   async close(): Promise<void> {
-    await this.redis.quit().catch(() => undefined);
+    this.closing = true;
+    await this.redis.quit().catch((error: unknown) => {
+      console.warn('[redis] close failed', { error: error instanceof Error ? error.message : String(error) });
+    });
   }
 }
