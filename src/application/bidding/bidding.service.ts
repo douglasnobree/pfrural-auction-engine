@@ -42,6 +42,24 @@ export interface BuyShoppingLotInput {
   displayName?: string;
 }
 
+export interface ShoppingReservationResult {
+  status: 'SOLD';
+  reservationId: string;
+  lotId: string;
+  lotStatus: 'SOLD';
+  sold: true;
+  winnerName: string | null;
+  fixedPriceCents: string;
+  winningAmountCents: string;
+  winnerAwardId: string;
+  settlementId: string;
+  lotSequence: string;
+  version: string;
+  expiresAt: string;
+  closedAt: string;
+  serverTime: string;
+}
+
 export interface BidCommandResult {
   status: 'ACCEPTED' | 'PENDING_ELIGIBILITY' | 'PENDING_APPROVAL' | 'REJECTED';
   bidRequestId: string;
@@ -153,20 +171,30 @@ export class BiddingService {
     return { lotId, active: Boolean(proxy), maxBidCents: proxy?.maxBidCents.toString() ?? null };
   }
 
-  async buyShoppingLot(input: BuyShoppingLotInput): Promise<BidCommandResult> {
+  async reserveShoppingLot(input: BuyShoppingLotInput): Promise<ShoppingReservationResult> {
     return this.database.transaction(async (client) => {
       const lot = await this.lockLot(client, input.lotId);
-      const phase = this.phaseFor(lot);
-
       if (lot.auction.mode !== 'SHOPPING') throw new DomainError('WRONG_AUCTION_MODE', 'This lot is not an immediate-purchase lot', 422);
       const fixedPriceCents = lot.fixedPriceCents ?? lot.startingBidCents;
-      const purchaseInput: PlaceBidInput = { ...input, amountCents: fixedPriceCents.toString(), origin: 'ONLINE' };
-      const request = await this.findOrCreateRequest(client, purchaseInput, fixedPriceCents, 'ONLINE', phase);
-      if (request.existing) {
-        if (request.row.requestedAmountCents !== fixedPriceCents) throw new DomainError('IDEMPOTENCY_KEY_REUSED', 'Idempotency-Key was already used with another amount', 409);
-        const previous = asJson<BidCommandResult>(request.row.result);
-        if (previous) return previous;
+      if (fixedPriceCents <= 0n) throw new DomainError('SHOPPING_PRICE_NOT_CONFIGURED', 'This lot does not have a valid fixed price', 422);
+
+      const previous = await client.shoppingReservation.findUnique({
+        where: { lotId_userId_idempotencyKey: { lotId: lot.id, userId: input.userId, idempotencyKey: input.idempotencyKey } },
+      });
+      if (previous) {
+        if (previous.amountCents !== null && previous.amountCents !== fixedPriceCents) throw new DomainError('IDEMPOTENCY_KEY_REUSED', 'Idempotency-Key was already used with another amount', 409);
+        const result = asJson<ShoppingReservationResult>(previous.result);
+        if (result) return result;
         throw new DomainError('COMMAND_IN_PROGRESS', 'The purchase is already being processed', 409);
+      }
+
+      const existingBuyerReservation = await client.shoppingReservation.findFirst({
+        where: { lotId: lot.id, userId: input.userId, status: { in: ['RESERVED', 'COMPLETED'] } },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (existingBuyerReservation) {
+        const result = asJson<ShoppingReservationResult>(existingBuyerReservation.result);
+        if (result) return result;
       }
 
       assertShoppingPurchaseWindow({
@@ -184,51 +212,67 @@ export class BiddingService {
       const registration = await client.auctionRegistration.findUnique({ where: { auctionId_userId: { auctionId: lot.auctionId, userId: input.userId } } });
       if (registration?.status !== 'APPROVED') throw new DomainError('REGISTRATION_REQUIRED', 'Participant must be approved before purchasing', 403);
 
-      const bid = await this.acceptRequestLocked(client, lot, request.row.id, fixedPriceCents, 'ONLINE', phase, purchaseInput, undefined);
       const closedAt = new Date();
-      const saleSequence = BigInt(bid.lotSequence) + 1n;
-      const saleVersion = BigInt(bid.version) + 1n;
+      const saleSequence = lot.lotSequence + 1n;
+      const saleVersion = lot.version + 1n;
+      const reservationId = randomUUID();
       const winnerName = readableParticipantName(input.displayName);
+      const expiresAt = lot.auction.endsAt;
+      if (!expiresAt) throw new DomainError('SHOPPING_END_REQUIRED', 'This market listing has no configured end date', 422);
       const award = await client.winnerAward.create({
-        data: { lotId: lot.id, winnerUserId: input.userId, winningAmountCents: fixedPriceCents, sourceEffectiveBidId: bid.effectiveBidId },
+        data: { lotId: lot.id, winnerUserId: input.userId, displayName: winnerName, winningAmountCents: fixedPriceCents },
       });
       const settlement = await client.settlement.create({
         data: { winnerAwardId: award.id, amountCents: fixedPriceCents, currency: lot.auction.currency },
       });
-
+      const result: ShoppingReservationResult = {
+        status: 'SOLD',
+        reservationId,
+        lotId: lot.id,
+        lotStatus: 'SOLD',
+        sold: true,
+        winnerName,
+        fixedPriceCents: fixedPriceCents.toString(),
+        winningAmountCents: fixedPriceCents.toString(),
+        winnerAwardId: award.id,
+        settlementId: settlement.id,
+        lotSequence: saleSequence.toString(),
+        version: saleVersion.toString(),
+        expiresAt: expiresAt.toISOString(),
+        closedAt: closedAt.toISOString(),
+        serverTime: closedAt.toISOString(),
+      };
+      await client.shoppingReservation.create({
+        data: {
+          id: reservationId,
+          lotId: lot.id,
+          userId: input.userId,
+          displayName: readableParticipantName(input.displayName),
+          idempotencyKey: input.idempotencyKey,
+          quantity: 1,
+          amountCents: fixedPriceCents,
+          status: 'COMPLETED',
+          expiresAt,
+          settlementId: settlement.id,
+          result: result as unknown as Prisma.InputJsonValue,
+        },
+      });
       await client.auctionLotExecution.update({
         where: { id: lot.id },
         data: { status: 'SOLD', availableQuantity: 0, lotSequence: saleSequence, version: saleVersion, endsAt: closedAt },
       });
-
-      const result: BidCommandResult = {
-        ...bid,
-        lotSequence: saleSequence.toString(),
-        version: saleVersion.toString(),
-        lotStatus: 'SOLD',
-        sold: true,
-        winnerName,
-        winningAmountCents: fixedPriceCents.toString(),
-        winnerAwardId: award.id,
-        settlementId: settlement.id,
-        closedAt: closedAt.toISOString(),
-        serverTime: closedAt.toISOString(),
-      };
-      await client.bidRequest.update({ where: { id: request.row.id }, data: { result: result as unknown as Prisma.InputJsonValue, completedAt: closedAt } });
-
       const payload = {
         lotId: lot.id,
         externalLotId: lot.externalLotId,
         status: 'SOLD' as const,
         lotStatus: 'SOLD' as const,
         sold: true,
+        reservationId,
         lotSequence: saleSequence.toString(),
         version: saleVersion.toString(),
-        currentPriceCents: fixedPriceCents.toString(),
-        currentBidderAlias: bid.currentBidderAlias,
-        currentBidderName: bid.currentBidderName,
-        winnerName,
+        fixedPriceCents: fixedPriceCents.toString(),
         winningAmountCents: fixedPriceCents.toString(),
+        winnerName,
         awardId: award.id,
         settlementId: settlement.id,
         closedAt: closedAt.toISOString(),
@@ -237,19 +281,43 @@ export class BiddingService {
       await appendDomainEvent(client, {
         eventType: 'lot.sold', routingKey: 'lot.sold', aggregateType: 'auction_lot_execution', aggregateId: lot.id,
         auctionId: lot.auctionId, lotId: lot.id, aggregateVersion: saleVersion, lotSequence: saleSequence,
-        correlationId: input.correlationId, causationId: request.row.id, actorId: input.actorId, payload,
+        correlationId: input.correlationId, causationId: reservationId, actorId: input.actorId, payload,
       });
       await appendDomainEvent(client, {
         eventType: 'winner.declared', routingKey: 'winner.declared', aggregateType: 'winner_award', aggregateId: award.id,
-        auctionId: lot.auctionId, lotId: lot.id, correlationId: input.correlationId, causationId: request.row.id, actorId: input.actorId,
-        payload: { lotId: lot.id, externalLotId: lot.externalLotId, awardId: award.id, settlementId: settlement.id, winnerName, winningAmountCents: fixedPriceCents.toString() }, writeEventLog: false,
+        auctionId: lot.auctionId, lotId: lot.id, correlationId: input.correlationId, causationId: reservationId, actorId: input.actorId,
+        payload: { lotId: lot.id, externalLotId: lot.externalLotId, awardId: award.id, settlementId: settlement.id, winnerName, winningAmountCents: fixedPriceCents.toString() },
+        writeEventLog: false,
       });
       await this.appendParticipantNotification(client, lot, {
-        type: 'LOT_WON', participantId: input.userId, winningAmountCents: fixedPriceCents, phase,
-        occurredAt: closedAt, correlationId: input.correlationId, causationId: request.row.id, actorId: input.actorId,
+        type: 'LOT_WON', participantId: input.userId, winningAmountCents: fixedPriceCents,
+        occurredAt: closedAt, correlationId: input.correlationId, causationId: reservationId, actorId: input.actorId,
       });
       return result;
     });
+  }
+
+  async listShoppingSales(auctionId: string): Promise<{ items: Array<Record<string, unknown>> }> {
+    const awards = await this.database.prisma.winnerAward.findMany({
+      where: { lot: { auctionId, auction: { mode: 'SHOPPING' } } },
+      include: { lot: { select: { id: true, externalLotId: true, lotNumber: true, title: true, auction: { select: { currency: true } } } } },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    });
+    return {
+      items: awards.map((award) => ({
+        saleId: award.id,
+        lotId: award.lot.id,
+        externalLotId: award.lot.externalLotId,
+        lotNumber: award.lot.lotNumber,
+        lotTitle: award.lot.title,
+        participantId: award.winnerUserId,
+        displayName: award.displayName,
+        amountCents: award.winningAmountCents.toString(),
+        currency: award.lot.auction.currency.trim(),
+        createdAt: award.createdAt.toISOString(),
+        status: 'SOLD',
+      })),
+    };
   }
 
   async placeBid(input: PlaceBidInput): Promise<BidCommandResult> {

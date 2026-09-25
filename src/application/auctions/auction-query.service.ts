@@ -19,6 +19,7 @@ type BidderProjection = {
   }>;
   winnerAward?: {
     winnerUserId: string;
+    displayName?: string | null;
   } | null;
 };
 
@@ -47,7 +48,8 @@ function currentBidderName(lot: BidderProjection): string | null {
 
 function winnerName(lot: BidderProjection, currentName: string | null): string | null {
   if (!lot.winnerAward) return null;
-  return participantName(lot, lot.winnerAward.winnerUserId)
+  return readableParticipantName(lot.winnerAward.displayName)
+    ?? participantName(lot, lot.winnerAward.winnerUserId)
     ?? (lot.winnerAward.winnerUserId === lot.currentBidderId ? currentName : null);
 }
 

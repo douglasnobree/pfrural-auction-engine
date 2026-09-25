@@ -232,6 +232,11 @@ export async function createApp(context = createContext()): Promise<{ app: Fasti
     managerFromRequest(request); const { auctionId } = auctionParam.parse(request.params); const query = pendingBidsQuery.parse(request.query);
     return context.bidding.listPendingEligibilityBids(auctionId, query.lotId, query.limit);
   });
+  app.get('/v1/manager/auctions/:auctionId/shopping-sales', async (request) => {
+    managerFromRequest(request);
+    const { auctionId } = auctionParam.parse(request.params);
+    return context.bidding.listShoppingSales(auctionId);
+  });
   app.get('/v1/manager/lots/:lotId/bids', async (request) => {
     managerFromRequest(request); const { lotId } = lotParam.parse(request.params); const query = bidHistoryQuery.parse(request.query);
     return context.bidding.listManagerEffectiveBids(lotId, query.beforeSequence, query.limit);

@@ -277,6 +277,7 @@ model WinnerAward {
   lotId               String       @unique @map("lot_id") @db.Uuid
   lot                 AuctionLotExecution @relation(fields: [lotId], references: [id])
   winnerUserId        String       @map("winner_user_id")
+  displayName         String?      @map("display_name")
   winningAmountCents  BigInt       @map("winning_amount_cents")
   sourceEffectiveBidId String?     @map("source_effective_bid_id") @db.Uuid
   sourceEffectiveBid  EffectiveBid? @relation(fields: [sourceEffectiveBidId], references: [id])
@@ -334,14 +335,18 @@ model ShoppingReservation {
   lotId          String            @map("lot_id") @db.Uuid
   lot            AuctionLotExecution @relation(fields: [lotId], references: [id])
   userId         String            @map("user_id")
+  displayName    String?           @map("display_name")
   idempotencyKey String            @map("idempotency_key")
   quantity       Int
+  amountCents    BigInt?           @map("amount_cents")
   status         ReservationStatus @default(RESERVED)
   expiresAt      DateTime          @map("expires_at")
   settlementId   String?           @map("settlement_id") @db.Uuid
   settlement     Settlement?       @relation(fields: [settlementId], references: [id])
+  result         Json?
   createdAt      DateTime          @default(now()) @map("created_at")
   @@unique([lotId, userId, idempotencyKey])
+  @@index([status, createdAt])
   @@map("shopping_reservation")
 }
 
