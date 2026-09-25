@@ -18,9 +18,18 @@ export class OutboxPublisher {
         await this.rabbit.publish(row.routingKey, row.payload as unknown as EventEnvelope);
         await this.database.prisma.outboxEvent.update({ where: { id: row.id }, data: { publishedAt: new Date(), lastError: null } });
         published += 1;
+        if (row.eventType === 'participant.notification.requested') {
+          console.info('[outbox] participant notification published', {
+            eventId: row.eventId,
+            eventType: row.eventType,
+            routingKey: row.routingKey,
+            attempt: row.attempts + 1,
+          });
+        }
       } catch (error) {
         const attempts = row.attempts + 1;
         const message = error instanceof Error ? error.message.slice(0, 1000) : 'publisher failure';
+        const safeMessage = message.replace(/\b(amqps?:\/\/)[^@\s/]+@/gi, '$1[credentials-redacted]@');
         if (attempts >= config.OUTBOX_MAX_ATTEMPTS) {
           await this.rabbit.publishDead(row.routingKey, row.payload as unknown as EventEnvelope, message).catch(() => undefined);
           await this.database.prisma.outboxEvent.update({ where: { id: row.id }, data: { publishedAt: new Date(), lastError: `DLQ: ${message}` } });
@@ -28,6 +37,15 @@ export class OutboxPublisher {
           const delayMs = Math.min(60000, 1000 * 2 ** Math.min(attempts, 6));
           await this.database.prisma.outboxEvent.update({ where: { id: row.id }, data: { nextAttemptAt: new Date(Date.now() + delayMs), lastError: message } });
         }
+        console.error('[outbox] event publish failed', {
+          eventId: row.eventId,
+          eventType: row.eventType,
+          routingKey: row.routingKey,
+          attempt: attempts,
+          maxAttempts: config.OUTBOX_MAX_ATTEMPTS,
+          sentToDeadLetterQueue: attempts >= config.OUTBOX_MAX_ATTEMPTS,
+          error: safeMessage,
+        });
       }
     }
     return published;
