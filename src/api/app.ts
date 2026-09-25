@@ -1,9 +1,9 @@
 import cors from '@fastify/cors';
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import { z, ZodError } from 'zod';
 import { config } from '../config.js';
 import { DomainError } from '../domain/errors.js';
-import { actorFromRequest, correlationId, idempotencyKey, internalRequest, managerFromRequest, trustedDisplayName } from './auth.js';
+import { actorFromRequest, correlationId, header, idempotencyKey, internalRequest, managerFromRequest, trustedDisplayName } from './auth.js';
 import { auctionParam, bidBody, bidHistoryQuery, bidManagementDeleteBody, bidManagementUpdateBody, currentLotBody, externalLotQuery, floorBidBody, idParam, internalRegistrationBody, lotParam, managerBody, parseBody, pendingBidsQuery, publishExecutionBody, proxyBidBody, rejectBody, registrationApprovalBody, registrationBody, registrationListQuery, reservationBody, sandboxBody, streamBody, whatsappConsentBody } from './contracts.js';
 import { AuctionQueryService } from '../application/auctions/auction-query.service.js';
 import { BiddingService } from '../application/bidding/bidding.service.js';
@@ -19,6 +19,7 @@ import { RabbitMq } from '../infrastructure/messaging/rabbitmq.js';
 import { RedisService } from '../infrastructure/redis/redis.service.js';
 import { SandboxService } from '../application/sandbox/sandbox.service.js';
 import { isPublicRealtimeEvent } from '../domain/public-events.js';
+import { logEvent, logRecovered, logRepeatedFailure } from '../infrastructure/logging/logger.js';
 
 export interface AppContext {
   database: Database;
@@ -48,7 +49,35 @@ export function createContext(): AppContext {
 }
 
 export async function createApp(context = createContext()): Promise<{ app: FastifyInstance; context: AppContext }> {
-  const app = Fastify({ logger: { level: config.LOG_LEVEL } });
+  const app = Fastify({ logger: false, disableRequestLogging: true });
+  const loggedServerErrors = new WeakSet<object>();
+  const requestLogFields = (request: FastifyRequest, statusCode: number, durationMs: number, includeCommandDetails = false) => {
+    const params = request.params && typeof request.params === 'object'
+      ? request.params as Record<string, unknown>
+      : {};
+    const body = request.body && typeof request.body === 'object'
+      ? request.body as Record<string, unknown>
+      : {};
+    const targetId = params.lotId ?? params.auctionId ?? params.id ?? params.externalLotId ?? params.externalAuctionId;
+    const action = params.action;
+    const amountCents = body.amountCents;
+    const quantity = body.quantity;
+    const origin = body.origin;
+    const externalCorrelationId = header(request, 'x-correlation-id');
+    return {
+      correlationId: externalCorrelationId ?? request.id,
+      ...(externalCorrelationId && externalCorrelationId !== request.id ? { requestId: request.id } : {}),
+      method: request.method,
+      route: request.routeOptions.url ?? request.url.split('?')[0],
+      status: statusCode,
+      durationMs: Math.round(durationMs * 10) / 10,
+      ...(typeof targetId === 'string' ? { targetId } : {}),
+      ...(includeCommandDetails && typeof action === 'string' ? { action } : {}),
+      ...(includeCommandDetails && (typeof amountCents === 'string' || typeof amountCents === 'number') ? { amountCents } : {}),
+      ...(includeCommandDetails && typeof quantity === 'number' ? { quantity } : {}),
+      ...(includeCommandDetails && typeof origin === 'string' ? { origin } : {}),
+    };
+  };
   app.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string' }, (_request, body, done) => done(null, body));
   await app.register(cors, {
     origin: true,
@@ -58,7 +87,35 @@ export async function createApp(context = createContext()): Promise<{ app: Fasti
   context.realtime.attach(app.server);
   void context.rabbit.consume('auction.websocket.v1', async (envelope) => {
     if (isPublicRealtimeEvent(envelope.eventType)) context.hub.broadcast(envelope);
-  }).catch((error: unknown) => app.log.warn({ error }, 'RabbitMQ websocket consumer unavailable'));
+  }).catch((error: unknown) => logEvent('warn', 'api', 'websocket.consumer.unavailable', { error }));
+
+  app.addHook('onResponse', async (request, reply) => {
+    const route = request.routeOptions.url;
+    if (route === '/ready') {
+      const failureKey = 'api:readiness';
+      const fields = requestLogFields(request, reply.statusCode, reply.elapsedTime);
+      if (reply.statusCode >= 500) {
+        logRepeatedFailure('api', 'readiness.failed', failureKey, 'Database readiness query failed', { ...fields, code: 'NOT_READY' });
+      } else {
+        logRecovered('api', 'readiness.recovered', failureKey, fields);
+      }
+      return;
+    }
+    if (reply.statusCode >= 500) {
+      if (!loggedServerErrors.has(request)) {
+        logEvent('error', 'api', 'request.failed', requestLogFields(request, reply.statusCode, reply.elapsedTime));
+      }
+      return;
+    }
+    if (reply.statusCode === 404 && !request.routeOptions.url) {
+      logEvent('warn', 'api', 'request.rejected', { ...requestLogFields(request, reply.statusCode, reply.elapsedTime), code: 'ROUTE_NOT_FOUND' });
+      return;
+    }
+    if (reply.statusCode >= 400) return;
+    if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method)) return;
+    if (request.routeOptions.url === '/v1/realtime/tickets') return;
+    logEvent('info', 'api', 'command.completed', requestLogFields(request, reply.statusCode, reply.elapsedTime, true));
+  });
 
   app.addHook('onRequest', async (request, reply) => {
     const pathname = request.url.split('?')[0] ?? '';
@@ -181,10 +238,25 @@ export async function createApp(context = createContext()): Promise<{ app: Fasti
 
   app.setErrorHandler((error, request, reply) => {
     const correlation = correlationId(request);
-    if (error instanceof ZodError) return reply.code(400).send({ error: { code: 'VALIDATION_ERROR', message: 'Request validation failed', details: error.flatten() }, correlationId: correlation });
-    if (error instanceof DomainError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message, ...(error.details ? { details: error.details } : {}) }, correlationId: correlation });
-    if (typeof error === 'object' && error !== null && 'statusCode' in error && (error as { statusCode?: unknown }).statusCode === 415) return reply.code(415).send({ error: { code: 'UNSUPPORTED_MEDIA_TYPE', message: 'Content-Type is not supported' }, correlationId: correlation });
-    request.log.error(error);
+    if (error instanceof ZodError) {
+      logEvent('warn', 'api', 'request.rejected', { ...requestLogFields(request, 400, reply.elapsedTime), code: 'VALIDATION_ERROR', issueCount: error.issues.length });
+      return reply.code(400).send({ error: { code: 'VALIDATION_ERROR', message: 'Request validation failed', details: error.flatten() }, correlationId: correlation });
+    }
+    if (error instanceof DomainError) {
+      if (error.statusCode >= 500) loggedServerErrors.add(request);
+      logEvent(error.statusCode >= 500 ? 'error' : 'warn', 'api', error.statusCode >= 500 ? 'request.failed' : 'request.rejected', {
+        ...requestLogFields(request, error.statusCode, reply.elapsedTime),
+        code: error.code,
+        ...(error.statusCode >= 500 ? { error } : {}),
+      });
+      return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message, ...(error.details ? { details: error.details } : {}) }, correlationId: correlation });
+    }
+    if (typeof error === 'object' && error !== null && 'statusCode' in error && (error as { statusCode?: unknown }).statusCode === 415) {
+      logEvent('warn', 'api', 'request.rejected', { ...requestLogFields(request, 415, reply.elapsedTime), code: 'UNSUPPORTED_MEDIA_TYPE' });
+      return reply.code(415).send({ error: { code: 'UNSUPPORTED_MEDIA_TYPE', message: 'Content-Type is not supported' }, correlationId: correlation });
+    }
+    loggedServerErrors.add(request);
+    logEvent('error', 'api', 'request.failed', { ...requestLogFields(request, 500, reply.elapsedTime), error });
     return reply.code(500).send({ error: { code: 'INTERNAL_ERROR', message: 'Internal server error' }, correlationId: correlation });
   });
   return { app, context };

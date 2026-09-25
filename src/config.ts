@@ -5,7 +5,7 @@ const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().min(1).max(65535).default(4100),
   HOST: z.string().default('0.0.0.0'),
-  LOG_LEVEL: z.string().default('info'),
+  LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent']).default('info'),
   DATABASE_URL: z.string().url(),
   DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(100).default(20),
   RABBITMQ_URL: z.string().url(),

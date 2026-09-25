@@ -1,5 +1,6 @@
 import { Redis } from 'ioredis';
 import { config } from '../../config.js';
+import { logEvent } from '../logging/logger.js';
 
 export class RedisService {
   private readonly redis = new Redis(config.REDIS_URL, { lazyConnect: true, maxRetriesPerRequest: 1 });
@@ -9,18 +10,18 @@ export class RedisService {
 
   constructor() {
     this.redis.on('ready', () => {
-      console.info(`[redis] ${this.unavailable ? 'connection restored' : 'connected'}`);
+      logEvent('info', 'redis', this.unavailable ? 'connection.restored' : 'connection.ready');
       this.unavailable = false;
     });
     this.redis.on('error', (error: Error) => {
       if (this.unavailable) return;
       this.unavailable = true;
-      console.error('[redis] connection error', { error: error.message });
+      logEvent('error', 'redis', 'connection.failed', { error });
     });
     this.redis.on('close', () => {
       if (this.closing || this.unavailable) return;
       this.unavailable = true;
-      console.warn('[redis] connection closed');
+      logEvent('warn', 'redis', 'connection.lost');
     });
   }
 
@@ -57,7 +58,7 @@ export class RedisService {
   async close(): Promise<void> {
     this.closing = true;
     await this.redis.quit().catch((error: unknown) => {
-      console.warn('[redis] close failed', { error: error instanceof Error ? error.message : String(error) });
+      logEvent('warn', 'redis', 'connection.close_failed', { error });
     });
   }
 }

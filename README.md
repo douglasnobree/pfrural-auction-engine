@@ -41,6 +41,12 @@ npm run dev:api
 npm run dev:worker
 ```
 
+### Logs operacionais
+
+API e worker escrevem uma linha curta por evento, com horário, nível, serviço, evento e campos de contexto. A API omite leituras bem-sucedidas e tickets WebSocket; registra comandos concluídos, recusas e falhas com rota, alvo, status, duração e correlação. O worker destaca encerramentos de lotes, resultados do leilão, mudanças nas dependências e falhas de publicação. Falhas repetidas em loops são resumidas a cada minuto e geram um evento de recuperação quando normalizam.
+
+`LOG_LEVEL` controla a saída; o padrão é `info`. Use `warn` para ocultar comandos concluídos e manter recusas/falhas, ou `error` para ver somente falhas.
+
 Em produção, use `AUTH_MODE=internal` e configure `INTERNAL_SERVICE_TOKEN` com
 pelo menos 32 caracteres aleatórios. O token de desenvolvimento não é aceito
 pelo engine em produção. A API aceita requisições de qualquer origem; a

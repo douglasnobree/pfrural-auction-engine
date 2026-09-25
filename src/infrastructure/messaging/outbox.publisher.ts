@@ -1,6 +1,7 @@
 import { config } from '../../config.js';
 import { Database } from '../database/db.js';
 import type { EventEnvelope } from '../events/envelope.js';
+import { logEvent, logRecovered, logRepeatedFailure } from '../logging/logger.js';
 import { RabbitMq } from './rabbitmq.js';
 
 function notificationType(payload: unknown): string {
@@ -26,27 +27,25 @@ export class OutboxPublisher {
         await this.rabbit.publish(row.routingKey, row.payload as unknown as EventEnvelope);
         await this.database.prisma.outboxEvent.update({ where: { id: row.id }, data: { publishedAt: new Date(), lastError: null } });
         published += 1;
-        if (row.eventType === 'participant.notification.requested') {
-          console.info('[outbox] participant notification published', {
-            eventId: row.eventId,
-            eventType: row.eventType,
-            notificationType: notificationType(row.payload),
-            routingKey: row.routingKey,
-            attempt: row.attempts + 1,
-          });
-        }
       } catch (error) {
         const attempts = row.attempts + 1;
         const message = error instanceof Error ? error.message.slice(0, 1000) : 'publisher failure';
         const safeMessage = message.replace(/\b(amqps?:\/\/)[^@\s/]+@/gi, '$1[credentials-redacted]@');
         if (attempts >= config.OUTBOX_MAX_ATTEMPTS) {
-          await this.rabbit.publishDead(row.routingKey, row.payload as unknown as EventEnvelope, message).catch(() => undefined);
+          await this.rabbit.publishDead(row.routingKey, row.payload as unknown as EventEnvelope, message).catch((deadLetterError: unknown) => {
+            logEvent('error', 'outbox', 'event.dead_letter_publish_failed', {
+              eventId: row.eventId,
+              eventType: row.eventType,
+              routingKey: row.routingKey,
+              error: deadLetterError,
+            });
+          });
           await this.database.prisma.outboxEvent.update({ where: { id: row.id }, data: { publishedAt: new Date(), lastError: `DLQ: ${message}` } });
         } else {
           const delayMs = Math.min(60000, 1000 * 2 ** Math.min(attempts, 6));
           await this.database.prisma.outboxEvent.update({ where: { id: row.id }, data: { nextAttemptAt: new Date(Date.now() + delayMs), lastError: message } });
         }
-        console.error('[outbox] event publish failed', {
+        logEvent('error', 'outbox', attempts >= config.OUTBOX_MAX_ATTEMPTS ? 'event.dead_lettered' : 'event.publish_failed', {
           eventId: row.eventId,
           eventType: row.eventType,
           ...(row.eventType === 'participant.notification.requested'
@@ -65,7 +64,12 @@ export class OutboxPublisher {
 
   async runLoop(intervalMs = 250): Promise<void> {
     while (!this.stopped) {
-      try { await this.runOnce(); } catch (error) { console.error('outbox publisher unavailable', error); }
+      try {
+        await this.runOnce();
+        logRecovered('outbox', 'publisher.recovered', 'outbox:publisher.loop');
+      } catch (error) {
+        logRepeatedFailure('outbox', 'publisher.unavailable', 'outbox:publisher.loop', error);
+      }
       await new Promise((resolve) => setTimeout(resolve, intervalMs));
     }
   }

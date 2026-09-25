@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import type { FastifyRequest } from 'fastify';
 import { config } from '../config.js';
 import { DomainError } from '../domain/errors.js';
@@ -45,5 +44,5 @@ export function idempotencyKey(request: FastifyRequest): string {
 }
 
 export function correlationId(request: FastifyRequest): string {
-  return header(request, 'x-correlation-id') ?? randomUUID();
+  return header(request, 'x-correlation-id') ?? request.id;
 }

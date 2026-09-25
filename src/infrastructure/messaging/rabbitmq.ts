@@ -1,6 +1,7 @@
 import amqp, { type ChannelModel, type ConfirmChannel, type ConsumeMessage } from 'amqplib';
 import { config } from '../../config.js';
 import type { EventEnvelope } from '../events/envelope.js';
+import { clearRepeatedFailure, logEvent, logRecovered, logRepeatedFailure } from '../logging/logger.js';
 
 export const DOMAIN_EXCHANGE = 'auction.events.v1';
 export const RETRY_EXCHANGE = 'auction.events.retry.v1';
@@ -56,7 +57,6 @@ export class RabbitMq {
 
   async connect(): Promise<void> {
     if (this.channel) return;
-    if (!this.connectionUnavailable) console.info('[rabbitmq] connecting', rabbitTarget());
     let connection: ChannelModel;
     try {
       connection = await amqp.connect(config.RABBITMQ_URL);
@@ -67,11 +67,9 @@ export class RabbitMq {
     let intentionalClose = false;
     connection.on('error', (error: Error) => this.logConnectionError(error, 'connection_runtime'));
     connection.on('close', () => {
-      if (this.closing || intentionalClose) {
-        console.info('[rabbitmq] connection closed');
-      } else if (!this.connectionUnavailable) {
+      if (!this.closing && !intentionalClose && !this.connectionUnavailable) {
         this.connectionUnavailable = true;
-        console.warn('[rabbitmq] connection closed unexpectedly', rabbitTarget());
+        logEvent('warn', 'rabbitmq', 'connection.lost', { target: rabbitTarget() });
       }
     });
     let channel: ConfirmChannel;
@@ -95,7 +93,7 @@ export class RabbitMq {
     }
     this.connection = connection;
     this.channel = channel;
-    console.info(`[rabbitmq] ${this.hasConnected ? 'connection restored' : 'connected'}; topology ready`, rabbitTarget());
+    logEvent('info', 'rabbitmq', this.hasConnected ? 'connection.restored' : 'connection.ready', { target: rabbitTarget(), topology: 'ready' });
     this.hasConnected = true;
     this.connectionUnavailable = false;
     this.lastFailureSignature = null;
@@ -117,7 +115,6 @@ export class RabbitMq {
     if (!this.channel) throw new Error('RabbitMQ channel unavailable');
     this.channel.publish(RETRY_EXCHANGE, routingKey, Buffer.from(JSON.stringify(envelope)), { persistent: true, contentType: 'application/json', headers: { 'x-retry-count': retryCount } });
     await this.channel.waitForConfirms();
-    console.warn('[rabbitmq] message forwarded for retry', { routingKey, eventId: envelope.eventId, eventType: envelope.eventType, retryCount });
   }
 
   async publishDead(routingKey: string, envelope: EventEnvelope, error: string): Promise<void> {
@@ -125,7 +122,6 @@ export class RabbitMq {
     if (!this.channel) throw new Error('RabbitMQ channel unavailable');
     this.channel.publish(DEAD_EXCHANGE, routingKey, Buffer.from(JSON.stringify(envelope)), { persistent: true, contentType: 'application/json', headers: { 'x-error': error } });
     await this.channel.waitForConfirms();
-    console.error('[rabbitmq] message forwarded to dead-letter exchange', { routingKey, eventId: envelope.eventId, eventType: envelope.eventType });
   }
 
   async consume(queue: string, handler: RabbitMessageHandler): Promise<void> {
@@ -140,19 +136,32 @@ export class RabbitMq {
           const envelope = JSON.parse(message.content.toString()) as EventEnvelope;
           await handler(envelope, message);
           this.channel?.ack(message);
+          logRecovered('rabbitmq', 'consumer.message.recovered', `rabbitmq:${queue}:${envelope.eventId}`, {
+            queue,
+            eventId: envelope.eventId,
+            eventType: envelope.eventType,
+          });
         } catch (error) {
           const retryCount = Number(message.properties.headers?.['x-retry-count'] ?? 0);
           const envelope = JSON.parse(message.content.toString()) as EventEnvelope;
-          console.error('[rabbitmq] consumer message failed', {
+          const failureKey = `rabbitmq:${queue}:${envelope.eventId}`;
+          const details = errorDetails(error);
+          const failureFields = {
             queue,
             routingKey: message.fields.routingKey,
             eventId: envelope.eventId,
             eventType: envelope.eventType,
             retryCount,
-            ...errorDetails(error),
-          });
-          if (retryCount < 5) await this.publishRetry(message.fields.routingKey, envelope, retryCount + 1);
-          else await this.publishDead(message.fields.routingKey, envelope, error instanceof Error ? error.message : 'consumer failure');
+            ...Object.fromEntries(Object.entries(details).filter(([key]) => key !== 'name' && key !== 'message')),
+          };
+          if (retryCount < 5) {
+            logRepeatedFailure('rabbitmq', 'consumer.message.retrying', failureKey, error, { ...failureFields, nextAction: 'retry', maxRetries: 5 });
+            await this.publishRetry(message.fields.routingKey, envelope, retryCount + 1);
+          } else {
+            clearRepeatedFailure(failureKey);
+            logEvent('error', 'rabbitmq', 'consumer.message.dead_lettered', { ...failureFields, ...details, nextAction: 'dead_letter' });
+            await this.publishDead(message.fields.routingKey, envelope, error instanceof Error ? error.message : 'consumer failure');
+          }
           this.channel?.ack(message);
         }
       });
@@ -160,7 +169,7 @@ export class RabbitMq {
       this.logConnectionError(error, 'consumer_setup', { queue });
       throw error;
     }
-    console.info('[rabbitmq] consumer listening', { queue });
+    logEvent('info', 'rabbitmq', 'consumer.ready', { queue });
   }
 
   async close(): Promise<void> {
@@ -178,7 +187,7 @@ export class RabbitMq {
     const signature = JSON.stringify({ phase, context, details });
     if (signature === this.lastFailureSignature) return;
     this.lastFailureSignature = signature;
-    console.error('[rabbitmq] connection failure', { phase, target: rabbitTarget(), ...context, ...details });
+    logEvent('error', 'rabbitmq', 'connection.failed', { phase, target: rabbitTarget(), ...context, ...details });
   }
 
   private async configureTopology(channel: ConfirmChannel): Promise<void> {
