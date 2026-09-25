@@ -3,6 +3,14 @@ import { Database } from '../database/db.js';
 import type { EventEnvelope } from '../events/envelope.js';
 import { RabbitMq } from './rabbitmq.js';
 
+function notificationType(payload: unknown): string {
+  if (!payload || typeof payload !== 'object') return 'unknown';
+  const eventPayload = (payload as { payload?: unknown }).payload;
+  if (!eventPayload || typeof eventPayload !== 'object') return 'unknown';
+  const type = (eventPayload as { type?: unknown }).type;
+  return typeof type === 'string' ? type : 'unknown';
+}
+
 export class OutboxPublisher {
   private stopped = false;
 
@@ -22,6 +30,7 @@ export class OutboxPublisher {
           console.info('[outbox] participant notification published', {
             eventId: row.eventId,
             eventType: row.eventType,
+            notificationType: notificationType(row.payload),
             routingKey: row.routingKey,
             attempt: row.attempts + 1,
           });
@@ -40,6 +49,9 @@ export class OutboxPublisher {
         console.error('[outbox] event publish failed', {
           eventId: row.eventId,
           eventType: row.eventType,
+          ...(row.eventType === 'participant.notification.requested'
+            ? { notificationType: notificationType(row.payload) }
+            : {}),
           routingKey: row.routingKey,
           attempt: attempts,
           maxAttempts: config.OUTBOX_MAX_ATTEMPTS,

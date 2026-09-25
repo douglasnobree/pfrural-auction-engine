@@ -45,7 +45,17 @@ const start = async (): Promise<void> => {
   try {
     await rabbit.consume('auction.notifications.v1', async (envelope) => {
       await inbox.once('auction-engine.notifications.v1', envelope, async () => {
-        if (['winner.declared', 'settlement.created', 'settlement.updated'].includes(envelope.eventType)) {
+        if (envelope.eventType === 'participant.notification.requested') {
+          console.info('[worker] participant notification event observed', {
+            eventId: envelope.eventId,
+            eventType: envelope.eventType,
+            notificationType:
+              typeof envelope.payload?.type === 'string'
+                ? envelope.payload.type
+                : 'unknown',
+            queue: 'auction.notifications.v1',
+          });
+        } else if (['winner.declared', 'settlement.created', 'settlement.updated'].includes(envelope.eventType)) {
           console.info('[worker] auction outcome event consumed', {
             eventId: envelope.eventId,
             eventType: envelope.eventType,
