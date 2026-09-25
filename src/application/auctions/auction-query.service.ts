@@ -82,7 +82,7 @@ export class AuctionQueryService {
   constructor(private readonly database: Database) {}
 
   async getAuctionSnapshot(auctionId: string): Promise<Record<string, unknown>> {
-    const auction = await this.database.prisma.auctionExecution.findUnique({ where: { id: auctionId }, include: { lots: { orderBy: { lotNumber: 'asc' }, include: { winnerAward: true, bidIntents: { select: { userId: true, displayName: true }, orderBy: { intentSequence: 'desc' } }, effectiveBids: { where: { voidedAt: null }, orderBy: { lotSequence: 'desc' }, take: 1, include: { bidIntent: { select: { displayName: true } } } } } } } });
+    const auction = await this.database.prisma.auctionExecution.findUnique({ where: { id: auctionId }, include: { lots: { orderBy: { lotNumber: 'asc' }, include: { winnerAward: true, bidIntents: { where: { bidRequest: { is: { status: 'ACCEPTED' } } }, select: { userId: true, displayName: true }, orderBy: { intentSequence: 'desc' } }, effectiveBids: { where: { voidedAt: null }, orderBy: { lotSequence: 'desc' }, take: 1, include: { bidIntent: { select: { displayName: true } } } } } } } });
     if (!auction) throw new DomainError('AUCTION_NOT_FOUND', 'Auction not found', 404);
     const stream = await this.database.prisma.streamSession.findFirst({ where: { auctionId }, orderBy: { createdAt: 'desc' } });
     const serverTime = new Date().toISOString();
@@ -134,7 +134,7 @@ export class AuctionQueryService {
   }
 
   async getLotByExternalId(externalAuctionId: string, externalLotId: string): Promise<{ id: string; auctionId: string; mode: string; status: string; currentPriceCents: string | null; currentBidderAlias: string | null; currentBidderName: string | null; winnerName: string | null; winningAmountCents: string | null; lotSequence: string; version: string; endsAt: string | null }> {
-    const lot = await this.database.prisma.auctionLotExecution.findFirst({ where: { externalLotId, auction: { externalAuctionId } }, include: { auction: true, winnerAward: true, bidIntents: { select: { userId: true, displayName: true }, orderBy: { intentSequence: 'desc' } }, effectiveBids: { where: { voidedAt: null }, orderBy: { lotSequence: 'desc' }, take: 1, include: { bidIntent: { select: { displayName: true } } } } } });
+    const lot = await this.database.prisma.auctionLotExecution.findFirst({ where: { externalLotId, auction: { externalAuctionId } }, include: { auction: true, winnerAward: true, bidIntents: { where: { bidRequest: { is: { status: 'ACCEPTED' } } }, select: { userId: true, displayName: true }, orderBy: { intentSequence: 'desc' } }, effectiveBids: { where: { voidedAt: null }, orderBy: { lotSequence: 'desc' }, take: 1, include: { bidIntent: { select: { displayName: true } } } } } });
     if (!lot) throw new DomainError('LOT_NOT_FOUND', 'Lot not found', 404);
     const name = currentBidderName(lot);
     const bidderAlias = currentBidderAlias(lot.auctionId, lot, name);
@@ -142,7 +142,7 @@ export class AuctionQueryService {
   }
 
   async getLot(lotId: string): Promise<{ id: string; auctionId: string; mode: string; status: string; currentPriceCents: string | null; currentBidderAlias: string | null; currentBidderName: string | null; winnerName: string | null; winningAmountCents: string | null; lotSequence: string; version: string; endsAt: string | null }> {
-    const lot = await this.database.prisma.auctionLotExecution.findUnique({ where: { id: lotId }, include: { auction: true, winnerAward: true, bidIntents: { select: { userId: true, displayName: true }, orderBy: { intentSequence: 'desc' } }, effectiveBids: { where: { voidedAt: null }, orderBy: { lotSequence: 'desc' }, take: 1, include: { bidIntent: { select: { displayName: true } } } } } });
+    const lot = await this.database.prisma.auctionLotExecution.findUnique({ where: { id: lotId }, include: { auction: true, winnerAward: true, bidIntents: { where: { bidRequest: { is: { status: 'ACCEPTED' } } }, select: { userId: true, displayName: true }, orderBy: { intentSequence: 'desc' } }, effectiveBids: { where: { voidedAt: null }, orderBy: { lotSequence: 'desc' }, take: 1, include: { bidIntent: { select: { displayName: true } } } } } });
     if (!lot) throw new DomainError('LOT_NOT_FOUND', 'Lot not found', 404);
     const name = currentBidderName(lot);
     return {

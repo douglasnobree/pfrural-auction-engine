@@ -275,9 +275,6 @@ export class BiddingService {
           amountCents,
           true,
         );
-        if (input.autoApproveRegistration) {
-          await this.ensureManagerRegistration(client, lot, input);
-        }
         const registration = await client.auctionRegistration.findUnique({ where: { auctionId_userId: { auctionId: lot.auctionId, userId: input.userId } } });
         if (!input.autoApproveRegistration && !registration) {
           throw new DomainError('REGISTRATION_REQUIRED', 'Participant registration is required before bidding', 403);
@@ -300,9 +297,19 @@ export class BiddingService {
           });
           return pending;
         }
-      return this.acceptRequestLocked(client, lot, request.row.id, amountCents, origin, phase, input, undefined);
+        return this.acceptRequestLocked(
+          client,
+          lot,
+          request.row.id,
+          amountCents,
+          origin,
+          phase,
+          input,
+          undefined,
+          input.autoApproveRegistration ? () => this.ensureManagerRegistration(client, lot, input) : undefined,
+        );
       } catch (error) {
-        if (!isDomainError(error)) throw error;
+        if (!isDomainError(error) || error.statusCode >= 500) throw error;
         const rejected = this.rejectedResult(request.row.id, lot, phase, error.code);
         await client.bidRequest.update({ where: { id: request.row.id }, data: { status: 'REJECTED', errorCode: error.code, result: rejected as unknown as Prisma.InputJsonValue, completedAt: new Date() } });
         await appendDomainEvent(client, {
@@ -398,7 +405,7 @@ export class BiddingService {
       if (sold && lot.currentPriceCents !== null) {
         const latest = await client.effectiveBid.findFirst({ where: { lotId: lot.id, voidedAt: null }, orderBy: { lotSequence: 'desc' }, include: { bidIntent: { select: { displayName: true } } } });
         const winnerIntent = winner
-          ? await client.bidIntent.findFirst({ where: { lotId: lot.id, userId: winner }, orderBy: { intentSequence: 'desc' }, select: { displayName: true } })
+          ? await client.bidIntent.findFirst({ where: { lotId: lot.id, userId: winner, bidRequest: { is: { status: 'ACCEPTED' } } }, orderBy: { intentSequence: 'desc' }, select: { displayName: true } })
           : null;
         winnerName = winner
           ? readableParticipantName(winnerIntent?.displayName)
@@ -453,7 +460,7 @@ export class BiddingService {
     const hasMore = rows.length > limit;
     const participantIds = [...new Set(rows.map((row) => row.userId))];
     const participantIntents = participantIds.length > 0
-      ? await this.database.prisma.bidIntent.findMany({ where: { lotId, userId: { in: participantIds } }, select: { userId: true, displayName: true }, orderBy: { intentSequence: 'desc' } })
+      ? await this.database.prisma.bidIntent.findMany({ where: { lotId, userId: { in: participantIds }, bidRequest: { is: { status: 'ACCEPTED' } } }, select: { userId: true, displayName: true }, orderBy: { intentSequence: 'desc' } })
       : [];
     const displayNames = new Map<string, string>();
     for (const intent of participantIntents) {
@@ -656,7 +663,7 @@ export class BiddingService {
         await this.acceptRequestLocked(client, lot, request.id, request.requestedAmountCents, request.origin, phase, input, undefined);
         return 'ACCEPTED';
       } catch (error) {
-        if (!isDomainError(error)) throw error;
+        if (!isDomainError(error) || error.statusCode >= 500) throw error;
         const rejected = this.rejectedResult(request.id, lot, phase, error.code);
         await client.bidRequest.update({ where: { id: request.id }, data: { status: 'REJECTED', errorCode: error.code, result: rejected as unknown as Prisma.InputJsonValue, completedAt: new Date() } });
         await appendDomainEvent(client, {
@@ -809,6 +816,16 @@ export class BiddingService {
     return lot;
   }
 
+  private async nextIntentSequence(client: PrismaTransaction, lotId: string): Promise<bigint> {
+    // Callers lock the lot row first; the max also recovers past partial intent writes.
+    const latest = await client.bidIntent.findFirst({
+      where: { lotId },
+      orderBy: { intentSequence: 'desc' },
+      select: { intentSequence: true },
+    });
+    return (latest?.intentSequence ?? 0n) + 1n;
+  }
+
   private async validateBid(
     client: PrismaTransaction,
     lot: LockedLot,
@@ -820,12 +837,7 @@ export class BiddingService {
     if (lot.auction.mode === 'SHOPPING') throw new DomainError('SHOPPING_PURCHASE_REQUIRED', 'Shopping lots must be purchased directly', 422);
     if (!['TIMED', 'LIVE'].includes(lot.auction.mode)) throw new DomainError('WRONG_AUCTION_MODE', 'This lot does not accept bids', 422);
     const preBidWindow = isPreBidWindow(lot.auction.mode, lot.auction.status, lot.auction.preBidEnabled);
-    try {
-      assertBiddingWindow({ mode: lot.auction.mode, status: lot.auction.status, preBidEnabled: lot.auction.preBidEnabled, preBidStartsAt: lot.auction.preBidStartsAt, preBidEndsAt: lot.auction.preBidEndsAt, auctionStartsAt: lot.auction.startsAt });
-    } catch (error) {
-      if (isDomainError(error)) throw error;
-      throw new DomainError('AUCTION_NOT_OPEN', 'Auction is not accepting bids', 409);
-    }
+    assertBiddingWindow({ mode: lot.auction.mode, status: lot.auction.status, preBidEnabled: lot.auction.preBidEnabled, preBidStartsAt: lot.auction.preBidStartsAt, preBidEndsAt: lot.auction.preBidEndsAt, auctionStartsAt: lot.auction.startsAt });
     if (lot.status !== 'OPEN') throw new DomainError('LOT_NOT_OPEN', 'Lot is not open for bids', 409);
     if (input.expectedVersion !== undefined && input.expectedVersion !== lot.version) throw new DomainError('VERSION_CONFLICT', 'Lot version is stale', 409, { currentVersion: lot.version.toString() });
     const now = Date.now();
@@ -887,13 +899,10 @@ export class BiddingService {
     });
   }
 
-  private async acceptRequestLocked(client: PrismaTransaction, lot: LockedLot, bidRequestId: string, amountCents: bigint, origin: BidOrigin, phase: BidPhase, input: PlaceBidInput, approvalActorId: string | undefined): Promise<BidCommandResult> {
+  private async acceptRequestLocked(client: PrismaTransaction, lot: LockedLot, bidRequestId: string, amountCents: bigint, origin: BidOrigin, phase: BidPhase, input: PlaceBidInput, approvalActorId: string | undefined, beforeIntentCreated?: () => Promise<void>): Promise<BidCommandResult> {
     const nextSequence = lot.lotSequence + 1n;
     const acceptedAt = new Date();
-    const intent = await client.bidIntent.create({ data: {
-      bidRequestId, lotId: lot.id, userId: input.userId, displayName: input.displayName, origin: origin as PrismaBidOrigin, requestedAmountCents: amountCents,
-      phase: phase as PrismaBidPhase, actorId: approvalActorId ?? input.actorId, intentSequence: nextSequence, approvedAt: acceptedAt,
-    } });
+    const intentId = randomUUID();
     const active = await client.proxyBid.findMany({ where: { lotId: lot.id, active: true } });
     const entries: ProxyEntry[] = active.map((row) => ({ userId: row.userId, displayName: row.displayName, maxBidCents: row.maxBidCents, origin: row.origin, acceptedSequence: row.acceptedSequence, intentId: row.acceptedIntentId }));
     const existingOwnProxy = entries.find((entry) => entry.userId === input.userId);
@@ -905,7 +914,13 @@ export class BiddingService {
       secondaryIncrementCents: lot.secondaryIncrementCents,
       nextIncrementIsSecondary: lot.nextIncrementIsSecondary,
     });
-    const evaluation = evaluateProxyBid({ entries, candidate: { userId: input.userId, displayName: input.displayName, maxBidCents: amountCents, origin, acceptedSequence: nextSequence, intentId: intent.id }, currentPriceCents: lot.currentPriceCents, currentBidderId: lot.currentBidderId, startingBidCents: lot.startingBidCents, incrementCents });
+    const evaluation = evaluateProxyBid({ entries, candidate: { userId: input.userId, displayName: input.displayName, maxBidCents: amountCents, origin, acceptedSequence: nextSequence, intentId }, currentPriceCents: lot.currentPriceCents, currentBidderId: lot.currentBidderId, startingBidCents: lot.startingBidCents, incrementCents });
+    const intentSequence = await this.nextIntentSequence(client, lot.id);
+    await beforeIntentCreated?.();
+    const intent = await client.bidIntent.create({ data: {
+      id: intentId, bidRequestId, lotId: lot.id, userId: input.userId, displayName: input.displayName, origin: origin as PrismaBidOrigin, requestedAmountCents: amountCents,
+      phase: phase as PrismaBidPhase, actorId: approvalActorId ?? input.actorId, intentSequence, approvedAt: acceptedAt,
+    } });
     if (origin === 'PROXY') {
       await client.proxyBid.updateMany({ where: { lotId: lot.id, userId: input.userId, active: true }, data: { active: false } });
       await client.proxyBid.create({ data: { lotId: lot.id, userId: input.userId, displayName: input.displayName, maxBidCents: amountCents, origin: origin as PrismaBidOrigin, acceptedIntentId: intent.id, acceptedSequence: nextSequence } });

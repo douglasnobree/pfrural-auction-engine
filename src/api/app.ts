@@ -1,5 +1,6 @@
 import cors from '@fastify/cors';
 import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
+import { Prisma } from '@prisma/client';
 import { z, ZodError } from 'zod';
 import { config } from '../config.js';
 import { DomainError } from '../domain/errors.js';
@@ -35,6 +36,29 @@ export interface AppContext {
   realtime: RealtimeGateway;
   redis: RedisService;
   sandbox: SandboxService;
+}
+
+function errorLogFields(error: unknown): Record<string, unknown> {
+  if (error instanceof Prisma.PrismaClientKnownRequestError) {
+    const constraint = error.meta?.target ?? error.meta?.constraint;
+    const errorMessage = error.code === 'P2002'
+      ? 'Unique constraint violation'
+      : error.code === 'P2003'
+        ? 'Foreign key constraint violation'
+        : error.code === 'P2025'
+          ? 'Required record was not found'
+          : 'Database request failed';
+    return {
+      errorName: error.name,
+      errorCode: error.code,
+      errorMessage,
+      ...(constraint !== undefined ? { constraint } : {}),
+    };
+  }
+  if (error instanceof Error) {
+    return { errorName: error.name, errorMessage: error.message.slice(0, 500) };
+  }
+  return { errorName: 'UnknownError', errorMessage: String(error).slice(0, 500) };
 }
 
 export function createContext(): AppContext {
@@ -108,7 +132,7 @@ export async function createApp(context = createContext()): Promise<{ app: Fasti
       return;
     }
     if (reply.statusCode === 404 && !request.routeOptions.url) {
-      logEvent('warn', 'api', 'request.rejected', { ...requestLogFields(request, reply.statusCode, reply.elapsedTime), code: 'ROUTE_NOT_FOUND' });
+      logEvent('debug', 'api', 'request.rejected', { ...requestLogFields(request, reply.statusCode, reply.elapsedTime), code: 'ROUTE_NOT_FOUND' });
       return;
     }
     if (reply.statusCode >= 400) return;
@@ -247,7 +271,7 @@ export async function createApp(context = createContext()): Promise<{ app: Fasti
       logEvent(error.statusCode >= 500 ? 'error' : 'warn', 'api', error.statusCode >= 500 ? 'request.failed' : 'request.rejected', {
         ...requestLogFields(request, error.statusCode, reply.elapsedTime),
         code: error.code,
-        ...(error.statusCode >= 500 ? { error } : {}),
+        ...(error.statusCode >= 500 ? errorLogFields(error) : {}),
       });
       return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message, ...(error.details ? { details: error.details } : {}) }, correlationId: correlation });
     }
@@ -256,7 +280,7 @@ export async function createApp(context = createContext()): Promise<{ app: Fasti
       return reply.code(415).send({ error: { code: 'UNSUPPORTED_MEDIA_TYPE', message: 'Content-Type is not supported' }, correlationId: correlation });
     }
     loggedServerErrors.add(request);
-    logEvent('error', 'api', 'request.failed', { ...requestLogFields(request, 500, reply.elapsedTime), error });
+    logEvent('error', 'api', 'request.failed', { ...requestLogFields(request, 500, reply.elapsedTime), ...errorLogFields(error) });
     return reply.code(500).send({ error: { code: 'INTERNAL_ERROR', message: 'Internal server error' }, correlationId: correlation });
   });
   return { app, context };
