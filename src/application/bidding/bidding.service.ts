@@ -909,7 +909,7 @@ export class BiddingService {
     if (lot.status !== 'OPEN') throw new DomainError('LOT_NOT_OPEN', 'Lot is not open for bids', 409);
     if (input.expectedVersion !== undefined && input.expectedVersion !== lot.version) throw new DomainError('VERSION_CONFLICT', 'Lot version is stale', 409, { currentVersion: lot.version.toString() });
     const now = Date.now();
-    if (!preBidWindow && lot.startsAt && now < lot.startsAt.getTime()) throw new DomainError('LOT_NOT_STARTED', 'Lot has not started', 409);
+    if (!preBidWindow && lot.auction.mode !== 'LIVE' && lot.startsAt && now < lot.startsAt.getTime()) throw new DomainError('LOT_NOT_STARTED', 'Lot has not started', 409);
     if (lot.endsAt && now >= lot.endsAt.getTime()) throw new DomainError('LOT_ENDED', 'Lot has ended', 409);
     if (!allowUnapprovedRegistration) {
       const registration = await client.auctionRegistration.findUnique({ where: { auctionId_userId: { auctionId: lot.auctionId, userId: input.userId } } });

@@ -86,3 +86,41 @@ describe('manager lot progression', () => {
     expect(client.auctionExecution.update).not.toHaveBeenCalled();
   });
 });
+
+describe('pre-bid expiration during a manual live opening', () => {
+  function setup(status: string) {
+    const { client, lot } = createManager({ currentLotId: null, currentLotStatus: null });
+    lot.status = 'OPEN';
+    client.auctionExecution.findUnique.mockResolvedValue({ status, currentLotId: null, currentLot: null } as never);
+    const prisma = {
+      auctionExecution: {
+        findMany: vi.fn().mockResolvedValue([{
+          id: lot.auctionId, mode: 'LIVE',
+          preBidEndsAt: new Date('2026-10-13T12:00:00Z'),
+          startsAt: new Date('2026-10-13T14:00:00Z'),
+        }]),
+      },
+      auctionLotExecution: { findMany: vi.fn().mockResolvedValue([{ id: lot.id }]) },
+    };
+    const database = {
+      prisma,
+      transaction: vi.fn(async (work: (transaction: typeof client) => Promise<unknown>) => work(client)),
+    };
+    return { service: new ManagerService(database as unknown as Database, {} as never), client, prisma, lot };
+  }
+
+  it('pauses open pre-bid lots when the auction is still scheduled', async () => {
+    const { service, client, prisma } = setup('SCHEDULED');
+    await expect(service.expirePreBidWindows(new Date('2026-10-13T12:00:00Z'))).resolves.toEqual({ finishedAuctions: 0, pausedLiveLots: 1 });
+    expect(prisma.auctionExecution.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ status: 'SCHEDULED' }) }));
+    expect(client.auctionLotExecution.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'PAUSED' }) }));
+  });
+
+  it('does not pause a lot when the auction starts after the worker query', async () => {
+    const { service, client } = setup('RUNNING');
+    await expect(service.expirePreBidWindows(new Date('2026-10-13T12:00:00Z'))).resolves.toEqual({ finishedAuctions: 0, pausedLiveLots: 0 });
+    expect(client.auctionLotExecution.update).not.toHaveBeenCalled();
+    expect(client.managerAction.create).not.toHaveBeenCalled();
+    expect(client.outboxEvent.create).not.toHaveBeenCalled();
+  });
+});

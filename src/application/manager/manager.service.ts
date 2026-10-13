@@ -70,15 +70,16 @@ export class ManagerService {
           select: { id: true },
         });
         for (const lot of openLots) {
-          await this.lotCommand(
+          const result = await this.lotCommand(
             lot.id,
             'pause',
             actorId,
             `prebid-expiration:pause:${lot.id}`,
             undefined,
             `prebid-expiration:${auction.id}`,
+            true,
           );
-          pausedLiveLots += 1;
+          if (!result.skipped) pausedLiveLots += 1;
         }
         continue;
       }
@@ -122,7 +123,7 @@ export class ManagerService {
     for (const lot of lots) await this.bidding.closeLot(lot.id, correlationId, actorId);
   }
 
-  async lotCommand(lotId: string, action: 'open' | 'pause' | 'resume' | 'announce' | 'withdraw', actorId: string, idempotencyKey: string, expectedVersion: bigint | undefined, correlationId: string): Promise<Record<string, unknown>> {
+  async lotCommand(lotId: string, action: 'open' | 'pause' | 'resume' | 'announce' | 'withdraw', actorId: string, idempotencyKey: string, expectedVersion: bigint | undefined, correlationId: string, onlyIfScheduled = false): Promise<Record<string, unknown>> {
     if (action === 'announce') return this.recordLotAnnouncement(lotId, actorId, idempotencyKey, correlationId);
     return this.database.transaction(async (client) => {
       const saved = await this.findAction(client, actorId, idempotencyKey);
@@ -135,10 +136,15 @@ export class ManagerService {
       const auction = await client.auctionExecution.findUnique({
         where: { id: lot.auctionId },
         select: {
+          status: true,
           currentLotId: true,
           currentLot: { select: { status: true } },
         },
       });
+      // The auction may have started after the expiration worker selected it.
+      if (onlyIfScheduled && auction?.status !== 'SCHEDULED') {
+        return { lotId, status: lot.status, skipped: true };
+      }
       const status: LotStatus = action === 'open' ? 'OPEN' : action === 'pause' ? 'PAUSED' : action === 'resume' ? 'OPEN' : 'CANCELLED';
       assertLotTransition(lot.status, status);
       const version = lot.version + 1n;
