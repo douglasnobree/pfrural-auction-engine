@@ -6,8 +6,8 @@ export type PrismaTransaction = Prisma.TransactionClient;
 export class Database {
   readonly prisma = new PrismaClient({ datasources: { db: { url: config.DATABASE_URL } } });
 
-  async transaction<T>(work: (client: PrismaTransaction) => Promise<T>): Promise<T> {
-    return this.prisma.$transaction(work, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+  async transaction<T>(work: (client: PrismaTransaction) => Promise<T>, timeout = 5000): Promise<T> {
+    return this.prisma.$transaction(work, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted, timeout });
   }
 
   async connect(): Promise<void> {

@@ -167,6 +167,11 @@ export async function createApp(context = createContext()): Promise<{ app: Fasti
   app.get('/v1/internal/auctions/by-external/:externalAuctionId/snapshot', async (request) => { internalRequest(request); return context.queries.getAuctionSnapshotByExternalId(String((request.params as { externalAuctionId: string }).externalAuctionId)); });
   app.get('/v1/internal/lots/by-external/:externalLotId', async (request) => { internalRequest(request); const params = z.object({ externalLotId: z.string().min(1) }).parse(request.params); return context.queries.getLotByExternalId(externalLotQuery.parse(request.query).externalAuctionId, params.externalLotId); });
   app.post('/v1/internal/executions/publish', async (request) => { internalRequest(request); return context.executions.publish(parseBody(publishExecutionBody, request.body), correlationId(request)); });
+  app.delete('/v1/internal/auctions/by-external/:externalAuctionId', async (request) => {
+    internalRequest(request);
+    const { externalAuctionId } = z.object({ externalAuctionId: z.string().min(1) }).parse(request.params);
+    return context.executions.purge(externalAuctionId);
+  });
   app.post('/v1/internal/sandbox/auctions', async (request) => { internalRequest(request); if (!config.SANDBOX_ENABLED || config.NODE_ENV === 'production') throw new DomainError('SANDBOX_DISABLED', 'Sandbox creation is disabled in this environment', 403); const body = parseBody(sandboxBody, request.body); return context.sandbox.create({ ...body, idempotencyKey: idempotencyKey(request) }, correlationId(request)); });
   app.post('/v1/internal/auctions/by-external/:externalAuctionId/registrations', async (request) => { internalRequest(request); const actor = actorFromRequest(request); const { externalAuctionId } = request.params as { externalAuctionId: string }; const body = parseBody(internalRegistrationBody, request.body); const snapshot = await context.queries.getAuctionSnapshotByExternalId(externalAuctionId); const auctionId = (snapshot.auction as { id: string }).id; return context.registrations.register(auctionId, actor.userId, body.termsVersion, idempotencyKey(request), correlationId(request), body.globallyEnabled, body.acquisitionSource, body.whatsappOptIn); });
   app.post('/v1/auctions/:auctionId/registrations', async (request) => {
