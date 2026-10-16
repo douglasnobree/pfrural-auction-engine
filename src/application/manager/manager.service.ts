@@ -7,6 +7,7 @@ import { preBidCutoffAt } from '../../domain/bidding-window.js';
 import { assertAuctionTransition, assertLotTransition } from '../../domain/state-machine.js';
 import type { AuctionStatus, LotStatus } from '../../domain/types.js';
 import { BiddingService } from '../bidding/bidding.service.js';
+import { assertStreamPlayback } from '../../domain/stream.js';
 
 export class ManagerService {
   constructor(private readonly database: Database, private readonly bidding: BiddingService) {}
@@ -243,6 +244,7 @@ export class ManagerService {
   }
 
   async updateStream(auctionId: string, actorId: string, idempotencyKey: string, input: { provider: string; playbackUrl?: string; providerStreamId?: string; status?: string }, expectedVersion: bigint | undefined, correlationId: string): Promise<Record<string, unknown>> {
+    assertStreamPlayback(input);
     return this.database.transaction(async (client) => {
       const saved = await this.findAction(client, actorId, idempotencyKey);
       if (saved) return saved;
@@ -250,10 +252,11 @@ export class ManagerService {
       const auction = await client.auctionExecution.findUnique({ where: { id: auctionId } });
       if (!auction) throw new DomainError('AUCTION_NOT_FOUND', 'Auction not found', 404);
       const current = await client.streamSession.findFirst({ where: { auctionId }, orderBy: { createdAt: 'desc' } });
+      if (expectedVersion !== undefined && expectedVersion !== (current?.version ?? 0n)) throw new DomainError('VERSION_CONFLICT', 'Stream version is stale', 409, { currentVersion: (current?.version ?? 0n).toString() });
       const status = (input.status ?? 'CREATED') as StreamStatus;
       if (!Object.values(StreamStatus).includes(status)) throw new DomainError('INVALID_STREAM_STATUS', 'Invalid stream status', 400);
-      const stream = current ? await client.streamSession.update({ where: { id: current.id }, data: { provider: input.provider, playbackUrl: input.playbackUrl, providerStreamId: input.providerStreamId, status, version: { increment: 1 } } }) : await client.streamSession.create({ data: { auctionId, provider: input.provider, playbackUrl: input.playbackUrl, providerStreamId: input.providerStreamId, status } });
-      const response = { auctionId, streamId: stream.id, provider: stream.provider, playbackUrl: stream.playbackUrl ?? null, status: stream.status, serverTime: new Date().toISOString() };
+      const stream = current ? await client.streamSession.update({ where: { id: current.id }, data: { provider: input.provider, playbackUrl: input.playbackUrl, providerStreamId: input.providerStreamId, status, version: { increment: 1 } } }) : await client.streamSession.create({ data: { auctionId, provider: input.provider, playbackUrl: input.playbackUrl, providerStreamId: input.providerStreamId, status, version: 1n } });
+      const response = { id: stream.id, auctionId, streamId: stream.id, provider: stream.provider, playbackUrl: stream.playbackUrl ?? null, providerStreamId: stream.providerStreamId ?? null, status: stream.status, version: stream.version.toString(), updatedAt: stream.updatedAt.toISOString(), serverTime: new Date().toISOString() };
       await this.saveAction(client, actorId, 'stream', 'auction', auctionId, idempotencyKey, expectedVersion, response);
       await appendDomainEvent(client, { eventType: 'stream.changed', routingKey: 'stream.changed', aggregateType: 'stream_session', aggregateId: stream.id, auctionId, correlationId, actorId, payload: response, writeEventLog: false });
       return response;
