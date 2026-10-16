@@ -124,7 +124,7 @@ export class ManagerService {
   }
 
   async lotCommand(lotId: string, action: 'open' | 'pause' | 'resume' | 'announce' | 'withdraw', actorId: string, idempotencyKey: string, expectedVersion: bigint | undefined, correlationId: string, onlyIfScheduled = false): Promise<Record<string, unknown>> {
-    if (action === 'announce') return this.recordLotAnnouncement(lotId, actorId, idempotencyKey, correlationId);
+    if (action === 'announce') return this.recordLotAnnouncement(lotId, actorId, idempotencyKey, correlationId, expectedVersion);
     return this.database.transaction(async (client) => {
       const saved = await this.findAction(client, actorId, idempotencyKey);
       if (saved) return saved;
@@ -202,15 +202,23 @@ export class ManagerService {
     return lot;
   }
 
-  async recordLotAnnouncement(lotId: string, actorId: string, idempotencyKey: string, correlationId: string): Promise<Record<string, unknown>> {
+  async recordLotAnnouncement(lotId: string, actorId: string, idempotencyKey: string, correlationId: string, expectedVersion?: bigint): Promise<Record<string, unknown>> {
     return this.database.transaction(async (client) => {
       const saved = await this.findAction(client, actorId, idempotencyKey);
       if (saved) return saved;
       await client.$queryRaw`SELECT id FROM auction_lot_execution WHERE id = ${lotId}::uuid FOR UPDATE`;
       const lot = await client.auctionLotExecution.findUnique({ where: { id: lotId } });
       if (!lot) throw new DomainError('LOT_NOT_FOUND', 'Lot not found', 404);
-      const response = { lotId, action: 'announce', version: lot.version.toString(), serverTime: new Date().toISOString() };
-      await this.saveAction(client, actorId, 'announce', 'lot', lotId, idempotencyKey, undefined, response);
+      if (expectedVersion !== undefined && expectedVersion !== lot.version) throw new DomainError('VERSION_CONFLICT', 'Lot version is stale', 409, { currentVersion: lot.version.toString() });
+      await client.$queryRaw`SELECT id FROM auction_execution WHERE id = ${lot.auctionId}::uuid FOR UPDATE`;
+      const auction = await client.auctionExecution.findUnique({ where: { id: lot.auctionId } });
+      if (!auction) throw new DomainError('AUCTION_NOT_FOUND', 'Auction not found', 404);
+      const auctionVersion = auction.version + 1n;
+      await client.auctionExecution.update({ where: { id: auction.id }, data: { currentLotId: lotId, version: auctionVersion } });
+      const serverTime = new Date().toISOString();
+      const response = { lotId, externalLotId: lot.externalLotId, action: 'announce', version: lot.version.toString(), currentLotId: lotId, auctionVersion: auctionVersion.toString(), serverTime };
+      await this.saveAction(client, actorId, 'announce', 'lot', lotId, idempotencyKey, expectedVersion, response);
+      await appendDomainEvent(client, { eventType: 'auction.current_lot.changed', routingKey: 'auction.current_lot.changed', aggregateType: 'auction_execution', aggregateId: auction.id, auctionId: auction.id, lotId, aggregateVersion: auctionVersion, correlationId, actorId, payload: { auctionId: auction.id, externalAuctionId: auction.externalAuctionId, currentLotId: lotId, version: auctionVersion.toString(), serverTime }, writeEventLog: false });
       await appendDomainEvent(client, { eventType: 'lot.announced', routingKey: 'lot.announced', aggregateType: 'auction_lot_execution', aggregateId: lotId, auctionId: lot.auctionId, lotId, correlationId, actorId, payload: response, writeEventLog: false });
       return response;
     });

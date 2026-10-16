@@ -21,6 +21,9 @@ function createManager(options: { currentLotId: string | null; currentLotStatus:
     },
     auctionExecution: {
       findUnique: vi.fn().mockResolvedValue({
+        id: lot.auctionId,
+        externalAuctionId: 'external-auction',
+        version: 7n,
         currentLotId: options.currentLotId,
         currentLot: options.currentLotStatus
           ? { status: options.currentLotStatus }
@@ -47,6 +50,62 @@ function createManager(options: { currentLotId: string | null; currentLotStatus:
 }
 
 describe('manager lot progression', () => {
+  it('selects an announced lot and emits its new current-lot state without opening it', async () => {
+    const { service, client, lot } = createManager({
+      currentLotId: '33333333-3333-4333-8333-333333333333',
+      currentLotStatus: 'OPEN',
+    });
+
+    await expect(service.lotCommand(
+      lot.id, 'announce', 'manager-1', 'announce-lot-2', lot.version, 'correlation-1',
+    )).resolves.toMatchObject({
+      lotId: lot.id, action: 'announce', version: '3', currentLotId: lot.id, auctionVersion: '8',
+    });
+
+    expect(client.auctionExecution.update).toHaveBeenCalledWith({
+      where: { id: lot.auctionId },
+      data: { currentLotId: lot.id, version: 8n },
+    });
+    expect(client.auctionLotExecution.update).not.toHaveBeenCalled();
+    expect(client.outboxEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        eventType: 'auction.current_lot.changed',
+        auctionId: lot.auctionId,
+        aggregateVersion: 8n,
+        payload: expect.objectContaining({
+          payload: expect.objectContaining({ currentLotId: lot.id, externalAuctionId: 'external-auction' }),
+        }),
+      }),
+    }));
+    expect(client.outboxEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ eventType: 'lot.announced', lotId: lot.id }),
+    }));
+  });
+
+  it('rejects a stale announcement without changing the current lot', async () => {
+    const { service, client, lot } = createManager({ currentLotId: null, currentLotStatus: null });
+
+    await expect(service.lotCommand(
+      lot.id, 'announce', 'manager-1', 'announce-stale', 2n, 'correlation-1',
+    )).rejects.toMatchObject({ code: 'VERSION_CONFLICT', statusCode: 409 });
+
+    expect(client.auctionExecution.update).not.toHaveBeenCalled();
+    expect(client.outboxEvent.create).not.toHaveBeenCalled();
+  });
+
+  it('replays an announcement without selecting the lot or emitting events again', async () => {
+    const { service, client, lot } = createManager({ currentLotId: null, currentLotStatus: null });
+    const saved = { lotId: lot.id, action: 'announce', version: '3', currentLotId: lot.id, auctionVersion: '8' };
+    client.managerAction.findUnique.mockResolvedValue({ result: saved } as never);
+
+    await expect(service.lotCommand(
+      lot.id, 'announce', 'manager-1', 'announce-replay', lot.version, 'correlation-1',
+    )).resolves.toEqual(saved);
+
+    expect(client.auctionExecution.update).not.toHaveBeenCalled();
+    expect(client.outboxEvent.create).not.toHaveBeenCalled();
+  });
+
   it('promotes an opened lot when the previous current lot is sold', async () => {
     const { service, client, lot } = createManager({
       currentLotId: '33333333-3333-4333-8333-333333333333',
