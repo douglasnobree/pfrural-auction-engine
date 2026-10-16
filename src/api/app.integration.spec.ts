@@ -417,7 +417,7 @@ describe.skipIf(!runIntegration)('auction engine API integration', () => {
         payload: { participantId: 'manager-unapproved', amountCents: '1100000', origin: 'FLOOR', displayName: 'Participante de teste' },
       });
       expect(floorBid.statusCode).toBe(200);
-      expect(floorBid.json().currentPriceCents).toBe('1000999');
+      expect(floorBid.json().currentPriceCents).toBe('1100000');
       await expect(
         context.database.prisma.auctionRegistration.findUnique({
           where: { auctionId_userId: { auctionId: auction.id, userId: 'manager-unapproved' } },

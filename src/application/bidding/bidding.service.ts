@@ -995,7 +995,8 @@ export class BiddingService {
     } else {
       await client.proxyBid.updateMany({ where: { lotId: lot.id, userId: input.userId, active: true }, data: { active: false } });
     }
-    const effectivePriceCents = origin === 'ONLINE' && evaluation.runnerUp === null && evaluation.leader.userId === input.userId
+    const useOfferedAmount = origin === 'FLOOR' || origin === 'PHONE' || (origin === 'ONLINE' && evaluation.runnerUp === null);
+    const effectivePriceCents = useOfferedAmount && evaluation.leader.userId === input.userId
       ? amountCents
       : evaluation.effectivePriceCents;
     const priceChanged = lot.currentPriceCents !== effectivePriceCents;
