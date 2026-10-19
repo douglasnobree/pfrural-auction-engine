@@ -47,7 +47,7 @@ function registrationResult(registration: {
 export class RegistrationService {
   constructor(private readonly database: Database, private readonly bidding?: BiddingService) {}
 
-  async register(auctionId: string, userId: string, termsVersion: string, idempotencyKey: string, correlationId: string, globallyEnabled = false, acquisitionSource: AcquisitionSource = 'UNKNOWN', whatsappOptIn = false): Promise<Record<string, unknown>> {
+  async register(auctionId: string, userId: string, termsVersion: string, idempotencyKey: string, correlationId: string, globallyEnabled = false, acquisitionSource: AcquisitionSource = 'UNKNOWN', whatsappOptIn?: boolean): Promise<Record<string, unknown>> {
     if (!termsVersion.trim()) throw new DomainError('TERMS_VERSION_REQUIRED', 'termsVersion is required', 400);
     return this.database.transaction(async (client) => {
       const auction = await client.auctionExecution.findUnique({ where: { id: auctionId } });
@@ -58,7 +58,7 @@ export class RegistrationService {
           throw new DomainError('REGISTRATION_TERMS_CONFLICT', 'An approved registration cannot change terms version', 409);
         }
         const shouldCaptureSource = existing.acquisitionSource === 'UNKNOWN' && acquisitionSource !== 'UNKNOWN';
-        const consentChanged = (existing.whatsappOptIn === true) !== whatsappOptIn;
+        const consentChanged = whatsappOptIn !== undefined && (existing.whatsappOptIn === true) !== whatsappOptIn;
         const registration = globallyEnabled && existing.status !== 'APPROVED'
           ? await client.auctionRegistration.update({ where: { id: existing.id }, data: { status: 'APPROVED', ...(shouldCaptureSource ? { acquisitionSource: acquisitionSource as PrismaAcquisitionSource } : {}), ...(consentChanged ? consentFields(whatsappOptIn) : {}) } })
           : shouldCaptureSource || consentChanged
@@ -75,7 +75,7 @@ export class RegistrationService {
         return registrationResult(registration, auctionId);
       }
       const status = globallyEnabled ? 'APPROVED' : 'PENDING';
-      const created = await client.auctionRegistration.create({ data: { auctionId, userId, status, termsVersion, acquisitionSource: acquisitionSource as PrismaAcquisitionSource, ...consentFields(whatsappOptIn) } });
+      const created = await client.auctionRegistration.create({ data: { auctionId, userId, status, termsVersion, acquisitionSource: acquisitionSource as PrismaAcquisitionSource, ...consentFields(whatsappOptIn ?? true) } });
       const registrationId = created.id;
       await appendDomainEvent(client, {
         eventType: globallyEnabled ? 'registration.approved' : 'registration.requested', routingKey: globallyEnabled ? 'registration.approved' : 'registration.requested', aggregateType: 'auction_registration', aggregateId: registrationId,

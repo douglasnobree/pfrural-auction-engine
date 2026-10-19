@@ -13,7 +13,7 @@ export const pendingBidsQuery = z.object({
   limit: positiveHistoryLimit.optional(),
 });
 export const acquisitionSource = z.enum(['DIRECT', 'WHATSAPP', 'FACEBOOK', 'INSTAGRAM', 'GOOGLE', 'TIKTOK', 'REFERRAL', 'ORGANIC', 'OTHER', 'UNKNOWN']);
-export const registrationBody = z.object({ termsVersion: z.string().trim().min(1).max(100), acquisitionSource: acquisitionSource.optional(), whatsappOptIn: z.boolean().optional().default(false) });
+export const registrationBody = z.object({ termsVersion: z.string().trim().min(1).max(100), acquisitionSource: acquisitionSource.optional(), whatsappOptIn: z.boolean().optional() });
 export const internalRegistrationBody = registrationBody.extend({ globallyEnabled: z.boolean().optional() });
 export const whatsappConsentBody = z.object({ whatsappOptIn: z.boolean() });
 export const registrationApprovalBody = z.object({ enabled: z.boolean() });

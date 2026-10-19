@@ -176,7 +176,7 @@ model AuctionRegistration {
   status      RegistrationStatus  @default(PENDING)
   termsVersion String            @map("terms_version")
   acquisitionSource AcquisitionSource @default(UNKNOWN) @map("acquisition_source")
-  whatsappOptIn Boolean              @default(false) @map("whatsapp_opt_in")
+  whatsappOptIn Boolean              @default(true) @map("whatsapp_opt_in")
   whatsappConsentAt DateTime?        @map("whatsapp_consent_at")
   whatsappConsentVersion String?     @map("whatsapp_consent_version")
   acceptedAt  DateTime            @default(now()) @map("accepted_at")

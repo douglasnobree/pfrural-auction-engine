@@ -148,7 +148,7 @@ describe.skipIf(!runIntegration)('auction engine API integration', () => {
         data: { status: 'OPEN', startsAt: new Date(now + 2 * 60 * 60_000), endsAt: new Date(now + 3 * 60 * 60_000) },
       });
       await context.database.prisma.auctionRegistration.create({
-        data: { auctionId: auction.id, userId: 'prebid-user-two', status: 'APPROVED', termsVersion: 'sandbox-v1' },
+        data: { auctionId: auction.id, userId: 'prebid-user-two', status: 'APPROVED', termsVersion: 'sandbox-v1', whatsappOptIn: false },
       });
 
       const firstBid = await app.inject({

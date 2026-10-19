@@ -59,7 +59,7 @@ export class SandboxService {
         lots.push({ id: lot.id, externalLotId: lot.externalLotId, lotNumber: lot.lotNumber, title: lot.title, status: lot.status });
       }
       await client.auctionExecution.update({ where: { id: auction.id }, data: { currentLotId: lots[0]?.id } });
-      await client.auctionRegistration.create({ data: { auctionId: auction.id, userId: input.participantId, status: 'APPROVED', termsVersion: 'sandbox-v1' } });
+      await client.auctionRegistration.create({ data: { auctionId: auction.id, userId: input.participantId, status: 'APPROVED', termsVersion: 'sandbox-v1', whatsappOptIn: false } });
       await client.streamSession.create({ data: { auctionId: auction.id, provider: 'mock', playbackUrl: `https://mock-stream.invalid/${externalAuctionId}`, providerStreamId: `mock-${externalAuctionId}`, status: 'LIVE' } });
       await appendDomainEvent(client, {
         eventType: 'auction.sandbox.created',

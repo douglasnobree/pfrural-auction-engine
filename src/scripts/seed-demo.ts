@@ -34,7 +34,17 @@ async function main(): Promise<void> {
     update: { status: 'OPEN', availableQuantity: 1 },
     create: { auctionId: shopping.id, externalLotId: 'demo-shopping-lot-1', lotNumber: 1, title: 'Demo Shopping Lot', status: 'OPEN', fixedPriceCents: 75000n, quantity: 1, availableQuantity: 1 },
   });
-  await prisma.auctionRegistration.upsert({ where: { auctionId_userId: { auctionId: timed.id, userId: 'user-demo' } }, update: { status: 'APPROVED' }, create: { auctionId: timed.id, userId: 'user-demo', status: 'APPROVED', termsVersion: 'demo-v1' } });
+  await prisma.auctionRegistration.upsert({
+    where: { auctionId_userId: { auctionId: timed.id, userId: 'user-demo' } },
+    update: { status: 'APPROVED' },
+    create: {
+      auctionId: timed.id,
+      userId: 'user-demo',
+      status: 'APPROVED',
+      termsVersion: 'demo-v1',
+      whatsappOptIn: false,
+    },
+  });
   console.log(JSON.stringify({ timedAuctionId: timed.id, timedLotId: timedLot.id, liveAuctionId: live.id, shoppingAuctionId: shopping.id }));
 }
 

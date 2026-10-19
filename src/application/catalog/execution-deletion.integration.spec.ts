@@ -16,7 +16,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')('execution deletio
       const lot = await database.prisma.auctionLotExecution.create({ data: { auctionId: auction.id, externalLotId: 'lot', lotNumber: 1, title: 'Lot' } });
       const otherLot = await database.prisma.auctionLotExecution.create({ data: { auctionId: other.id, externalLotId: 'control-lot', lotNumber: 1, title: 'Control lot' } });
       await database.prisma.auctionExecution.update({ where: { id: auction.id }, data: { currentLotId: lot.id } });
-      const registration = await database.prisma.auctionRegistration.create({ data: { auctionId: auction.id, userId: 'test-user', termsVersion: 'test' } });
+      const registration = await database.prisma.auctionRegistration.create({ data: { auctionId: auction.id, userId: 'test-user', termsVersion: 'test', whatsappOptIn: false } });
       const request = await database.prisma.bidRequest.create({ data: { lotId: lot.id, userId: 'test-user', idempotencyKey: 'test-bid', commandId: 'test-command', requestedAmountCents: 100n } });
       const intent = await database.prisma.bidIntent.create({ data: { bidRequestId: request.id, lotId: lot.id, userId: 'test-user', origin: 'ONLINE', requestedAmountCents: 100n, intentSequence: 1n } });
       await database.prisma.proxyBid.create({ data: { lotId: lot.id, userId: 'test-user', maxBidCents: 100n, origin: 'ONLINE', acceptedIntentId: intent.id, acceptedSequence: 1n } });

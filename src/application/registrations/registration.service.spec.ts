@@ -17,7 +17,7 @@ describe('RegistrationService', () => {
       auctionExecution: { findUnique: vi.fn().mockResolvedValue({ id: 'auction-id' }) },
       auctionRegistration: {
         findUnique: vi.fn().mockResolvedValue(null),
-        create: vi.fn().mockResolvedValue({ id: 'registration-id', userId: 'user-id', status: 'PENDING', termsVersion: 'terms-v1', acquisitionSource: 'UNKNOWN', whatsappOptIn: false, whatsappConsentAt: null, whatsappConsentVersion: null, acceptedAt }),
+        create: vi.fn().mockResolvedValue({ id: 'registration-id', userId: 'user-id', status: 'PENDING', termsVersion: 'terms-v1', acquisitionSource: 'UNKNOWN', whatsappOptIn: true, whatsappConsentAt: acceptedAt, whatsappConsentVersion: 'auction-whatsapp-v1', acceptedAt }),
       },
       outboxEvent: { create: vi.fn().mockResolvedValue({}) },
     };
@@ -26,7 +26,7 @@ describe('RegistrationService', () => {
     const result = await service.register('auction-id', 'user-id', 'terms-v1', 'registration-key', 'correlation-id');
 
     expect(result).toMatchObject({ registrationId: 'registration-id', status: 'PENDING', userId: 'user-id' });
-    expect(client.auctionRegistration.create).toHaveBeenCalledWith({ data: expect.objectContaining({ auctionId: 'auction-id', userId: 'user-id', status: 'PENDING', termsVersion: 'terms-v1', acquisitionSource: 'UNKNOWN', whatsappOptIn: false }) });
+    expect(client.auctionRegistration.create).toHaveBeenCalledWith({ data: expect.objectContaining({ auctionId: 'auction-id', userId: 'user-id', status: 'PENDING', termsVersion: 'terms-v1', acquisitionSource: 'UNKNOWN', whatsappOptIn: true, whatsappConsentAt: expect.any(Date), whatsappConsentVersion: 'auction-whatsapp-v1' }) });
     expect(client.outboxEvent.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ eventType: 'registration.requested' }) }));
   });
 
@@ -36,7 +36,7 @@ describe('RegistrationService', () => {
       auctionExecution: { findUnique: vi.fn().mockResolvedValue({ id: 'auction-id' }) },
       auctionRegistration: {
         findUnique: vi.fn().mockResolvedValue(null),
-        create: vi.fn().mockResolvedValue({ id: 'registration-id', userId: 'user-id', status: 'APPROVED', termsVersion: 'terms-v1', acquisitionSource: 'UNKNOWN', whatsappOptIn: false, whatsappConsentAt: null, whatsappConsentVersion: null, acceptedAt }),
+        create: vi.fn().mockResolvedValue({ id: 'registration-id', userId: 'user-id', status: 'APPROVED', termsVersion: 'terms-v1', acquisitionSource: 'UNKNOWN', whatsappOptIn: true, whatsappConsentAt: acceptedAt, whatsappConsentVersion: 'auction-whatsapp-v1', acceptedAt }),
       },
       outboxEvent: { create: vi.fn().mockResolvedValue({}) },
     };
@@ -45,7 +45,7 @@ describe('RegistrationService', () => {
     const result = await service.register('auction-id', 'user-id', 'terms-v1', 'registration-key', 'correlation-id', true);
 
     expect(result).toMatchObject({ registrationId: 'registration-id', status: 'APPROVED', userId: 'user-id' });
-    expect(client.auctionRegistration.create).toHaveBeenCalledWith({ data: expect.objectContaining({ auctionId: 'auction-id', userId: 'user-id', status: 'APPROVED', termsVersion: 'terms-v1', acquisitionSource: 'UNKNOWN', whatsappOptIn: false }) });
+    expect(client.auctionRegistration.create).toHaveBeenCalledWith({ data: expect.objectContaining({ auctionId: 'auction-id', userId: 'user-id', status: 'APPROVED', termsVersion: 'terms-v1', acquisitionSource: 'UNKNOWN', whatsappOptIn: true, whatsappConsentAt: expect.any(Date), whatsappConsentVersion: 'auction-whatsapp-v1' }) });
     expect(client.outboxEvent.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ eventType: 'registration.approved' }) }));
   });
 
@@ -87,6 +87,23 @@ describe('RegistrationService', () => {
 
     await expect(service.register('auction-id', 'user-id', 'terms-v1', 'registration-key', 'correlation-id', false, 'WHATSAPP')).resolves.toMatchObject({ acquisitionSource: 'WHATSAPP' });
     expect(client.auctionRegistration.update).toHaveBeenCalledWith({ where: { id: 'registration-id' }, data: { acquisitionSource: 'WHATSAPP' } });
+  });
+
+  it('preserves an existing opt-out when registration is repeated without a new preference', async () => {
+    const acceptedAt = new Date('2026-08-05T12:00:00.000Z');
+    const existing = { id: 'registration-id', auctionId: 'auction-id', userId: 'user-id', status: 'PENDING', termsVersion: 'terms-v1', acquisitionSource: 'UNKNOWN', whatsappOptIn: false, whatsappConsentAt: null, whatsappConsentVersion: null, acceptedAt };
+    const update = vi.fn();
+    const client = {
+      auctionExecution: { findUnique: vi.fn().mockResolvedValue({ id: 'auction-id' }) },
+      auctionRegistration: { findUnique: vi.fn().mockResolvedValue(existing), update },
+      outboxEvent: { create: vi.fn().mockResolvedValue({}) },
+    };
+    const service = serviceWithClient(client);
+
+    const result = await service.register('auction-id', 'user-id', 'terms-v1', 'registration-key', 'correlation-id');
+
+    expect(result).toMatchObject({ whatsappOptIn: false, whatsappConsentAt: null, whatsappConsentVersion: null });
+    expect(update).not.toHaveBeenCalled();
   });
 
   it('records and revokes WhatsApp consent idempotently', async () => {
